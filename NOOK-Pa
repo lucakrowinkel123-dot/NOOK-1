@@ -1,0 +1,292 @@
+const string LCD_PATH_NAME = "ANOUK-PF LCD 1"; 
+const string LCD_CONFIRM_NAME = "ANOUK-PF LCD 2"; 
+const string INDICATOR_NAME = "ANOUK-PF Indicator Light"; 
+const string SOUND_BLOCK_NAME = "ANOUK-PF Sound Block"; 
+const string SENSOR_TAG = "ANOUK-PF Sensor"; // Ensure your sensor has this name
+const string PATHFINDER_CHANNEL = "ANOUK-Ca_PathFinder_Channel"; 
+const string REMOTE_TAG = "ANOUK-PF Remote Control"; 
+const double CLOSE_ENOUGH_DEFAULT = 1.0; 
+
+// PID TUNING FOR STABILITY
+const double gyroP = 0.5; const double gyroI = 0.002; const double gyroD = 0.5; const double gyroMax = 2;
+
+IMyTextPanel lcdPath; IMyTextPanel lcdConfirm; IMyLightingBlock indicatorLight; IMySoundBlock soundBlock; IMyRemoteControl remote; 
+IMySensorBlock sensor; // Added sensor reference
+GyroControl gyroControl;
+
+bool blinkRequested = false; int blinkTicks = 0; Color blinkColor = new Color(0, 255, 0); 
+
+// Path data 
+List<Vector3D> pathGPS = new List<Vector3D>(); 
+List<string> pathGPSStrings = new List<string>(); 
+List<string> pathOrientations = new List<string>(); 
+List<double> pathCloseEnoughs = new List<double>(); 
+double pathMaxSpeed = -1; 
+
+// ---- RECORDING MODE STATE ---- 
+bool recordingActive = false; bool recordingPaused = false; 
+Vector3D recordingLastGPS = Vector3D.Zero; double recordingTimer = 0; 
+const double RECORDING_INTERVAL = 10.0; const double RECORDING_DISTANCE = 25.0; 
+
+// ---- NEW SETUP STATE ----
+bool isSoftLocked = false;
+Vector3D lockedPos;
+MatrixD lockedMatrix;
+int setupStep = 0;
+Vector3D setupPos1 = Vector3D.Zero;
+Vector3D setupPos2 = Vector3D.Zero;
+
+public Program() { 
+    Runtime.UpdateFrequency = UpdateFrequency.Update10; 
+    IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL); 
+} 
+
+public void Main(string argument, UpdateType updateSource) { 
+    lcdPath = GridTerminalSystem.GetBlockWithName(LCD_PATH_NAME) as IMyTextPanel; 
+    lcdConfirm = GridTerminalSystem.GetBlockWithName(LCD_CONFIRM_NAME) as IMyTextPanel; 
+    indicatorLight = GridTerminalSystem.GetBlockWithName(INDICATOR_NAME) as IMyLightingBlock; 
+    remote = GridTerminalSystem.GetBlockWithName(REMOTE_TAG) as IMyRemoteControl; 
+    sensor = GridTerminalSystem.GetBlockWithName(SENSOR_TAG) as IMySensorBlock; // Initialize sensor
+    soundBlock = GridTerminalSystem.GetBlockWithName(SOUND_BLOCK_NAME) as IMySoundBlock; 
+
+    if (remote != null && gyroControl == null) {
+        List<IMyGyro> gyros = new List<IMyGyro>();
+        GridTerminalSystem.GetBlocksOfType(gyros);
+        gyroControl = new GyroControl(remote, gyros);
+    }
+
+    double deltaTime = Runtime.TimeSinceLastRun.TotalSeconds; 
+    string cmd = (argument ?? "").Trim(); 
+    string commandPrefix = null; 
+    bool isSendCommand = false; 
+
+    // --- NEW 3-STEP SETUP WITH SENSOR VISUALS ---
+    if (cmd.Equals("PF_ExcavationSiteSetUpComplete", StringComparison.OrdinalIgnoreCase)) {
+        if (remote == null) return;
+        setupStep++;
+        if (setupStep == 1) {
+            isSoftLocked = true;
+            lockedPos = remote.GetPosition();
+            lockedMatrix = remote.WorldMatrix;
+            ConfigureSensorVisuals(true); // TURN ON VISUAL GUIDE
+            Echo("Step 1: Locked. Visuals On. Go to A.");
+        } else if (setupStep == 2) {
+            setupPos1 = remote.GetPosition();
+            Echo("Step 2: A Set. Go to B.");
+        } else if (setupStep == 3) {
+            setupPos2 = remote.GetPosition();
+            double y, p, r; GetRotationAngles(lockedMatrix.Forward, lockedMatrix.Up, out y, out p, out r);
+            string orient = $"{y:F2},{p:F2},{r:F2}";
+            string gpsA = $"GPS:CornerA:{setupPos1.X:F2}:{setupPos1.Y:F2}:{setupPos1.Z:F2}:";
+            string gpsB = $"GPS:CornerB:{setupPos2.X:F2}:{setupPos2.Y:F2}:{setupPos2.Z:F2}:";
+            string msg = $"ExcavationSiteSetUpComplete|{orient}|{gpsA}|{gpsB}";
+            IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg);
+            Echo($"Sent Setup: {msg}");
+            setupStep = 0; isSoftLocked = false; 
+            ConfigureSensorVisuals(false); // TURN OFF VISUAL GUIDE
+            StopOverrides();
+        }
+    }
+
+    // --- STANDARD COMMANDS --- 
+    else if (cmd.Equals("PF_ExcavationSitePathAdd", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "ExcavationSitePathAdd"; isSendCommand = true; } 
+    else if (cmd.Equals("PF_ExcavationSiteStagger", StringComparison.OrdinalIgnoreCase)) { 
+        commandPrefix = "ExcavationSiteStagger"; isSendCommand = true; 
+        if (recordingActive) StopRecordingMode(); 
+        ConfigureSensorVisuals(true); // Turn on visuals for stagger alignment
+    } 
+    else if (cmd.Equals("PF_ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase)) { 
+        commandPrefix = "ExcavationSiteCancel"; isSendCommand = true; 
+        if (recordingActive) StopRecordingMode();
+        isSoftLocked = false; setupStep = 0; 
+        ConfigureSensorVisuals(false); // Clean up visuals
+        StopOverrides();
+    } 
+    else if (cmd.Equals("PF_ReturnRequest", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
+    else if (cmd.Equals("PF_MaxSpeedRequest", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
+    else if (cmd.Equals("PF_ExcavationSitePathStartRecording", StringComparison.OrdinalIgnoreCase)) { StartRecordingMode(); } 
+    else if (cmd.Equals("PF_ExcavationSitePathStopRecording", StringComparison.OrdinalIgnoreCase)) { StopRecordingMode(); } 
+
+    // --- SEND COMMAND --- 
+    if (isSendCommand) { 
+        string msg; 
+        if (commandPrefix == "ExcavationSitePathAdd" || commandPrefix == "ExcavationSiteStagger") { 
+            if (remote == null) { Echo("No remote found!"); return; } 
+            var pos = remote.GetPosition(); 
+            string gps = $"GPS:Site:{pos.X:F2}:{pos.Y:F2}:{pos.Z:F2}:"; 
+            double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
+            string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
+            msg = $"{commandPrefix}|{gps}|{orient}"; 
+        } else { msg = commandPrefix; } 
+        IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg); Echo($"Sent: {msg}"); 
+    } 
+
+    // --- IGC LISTENING --- 
+    var listeners = new List<IMyBroadcastListener>(); IGC.GetBroadcastListeners(listeners); 
+    foreach (var listener in listeners) { 
+        while (listener.HasPendingMessage) { 
+            var m = listener.AcceptMessage(); string str = m.Data as string; 
+            if (str != null) { 
+                if (str.StartsWith("Confirmed_Entry|")) HandleConfirmedEntry(str); 
+                else if (str.StartsWith("Path|")) HandlePathMessage(str); 
+                else if (str.StartsWith("PathfinderMaxSpeed|")) HandleMaxSpeed(str); 
+            } 
+        } 
+    } 
+
+    // --- BLINK --- 
+    if (blinkRequested && indicatorLight != null) { blinkTicks++; if (blinkTicks >= 5) { indicatorLight.Enabled = false; blinkRequested = false; } } 
+
+    // --- SOFT LOCK & RECORDING LOGIC --- 
+    if (isSoftLocked && remote != null) ApplySoftLock(deltaTime);
+
+    if (recordingActive && !recordingPaused && remote != null) { 
+        recordingTimer += deltaTime; 
+        if (recordingTimer >= RECORDING_INTERVAL) { 
+            var dist = (remote.GetPosition() - recordingLastGPS).Length(); 
+            if (dist >= RECORDING_DISTANCE) { SendPFExcavationSitePathAdd(); recordingPaused = true; } 
+        } 
+    } 
+    OutputPathStatus(); 
+} 
+
+// --- SENSOR CONFIGURATION HELPER ---
+void ConfigureSensorVisuals(bool active) {
+    if (sensor == null) return;
+    if (active) {
+        sensor.FrontExtend = 50f;
+        sensor.BackExtend = 0.1f;
+        sensor.LeftExtend = 0.1f;
+        sensor.RightExtend = 0.1f;
+        sensor.TopExtend = 0.1f;
+        sensor.BottomExtend = 0.1f;
+        sensor.Enabled = true;
+        sensor.ShowOnHUD = true;
+    } else {
+        sensor.Enabled = false;
+        sensor.ShowOnHUD = false;
+    }
+}
+
+// ... [Remainder of your GyroControl, PID, and Helper classes/methods stay exactly the same] ...
+
+void ApplySoftLock(double dt) {
+    if (remote.RotationIndicator.LengthSquared() < 0.01f && Math.Abs(remote.RollIndicator) < 0.01f) {
+        gyroControl?.FaceVectors(lockedMatrix.Forward, lockedMatrix.Up, dt);
+    } else gyroControl?.Reset();
+
+    Vector3D deltaPos = lockedPos - remote.GetPosition();
+    double fwdErr = Vector3D.Dot(deltaPos, remote.WorldMatrix.Forward);
+    if (Math.Abs(remote.MoveIndicator.Z) < 0.1f) {
+        double cVel = Vector3D.Dot(remote.GetShipVelocities().LinearVelocity, remote.WorldMatrix.Forward);
+        double tVel = MathHelper.Clamp((fwdErr / 5.0) * 2.0, -3.0, 3.0);
+        double vErr = tVel - cVel;
+        List<IMyThrust> thrusters = new List<IMyThrust>(); GridTerminalSystem.GetBlocksOfType(thrusters);
+        foreach (var t in thrusters) {
+            if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Backward) > 0.9) t.ThrustOverride = vErr > 0.05 ? (float)(vErr * 180000) : 0;
+            if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Forward) > 0.9) t.ThrustOverride = vErr < -0.05 ? (float)(Math.Abs(vErr) * 180000) : 0;
+        }
+    } else StopThrusterOverrides();
+}
+
+void StartRecordingMode() { recordingActive = true; recordingPaused = true; recordingTimer = 0; recordingLastGPS = remote != null ? remote.GetPosition() : Vector3D.Zero; SendPFExcavationSitePathAdd(); Echo("[Recording Mode] Started."); } 
+void StopRecordingMode() { recordingActive = false; recordingPaused = false; recordingTimer = 0; recordingLastGPS = Vector3D.Zero; Echo("[Recording Mode] Stopped."); } 
+
+void SendPFExcavationSitePathAdd() { 
+    if (remote == null) return; 
+    string gps = $"GPS:Site:{remote.GetPosition().X:F2}:{remote.GetPosition().Y:F2}:{remote.GetPosition().Z:F2}:"; 
+    double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
+    string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
+    string msg = $"ExcavationSitePathAdd|{gps}|{orient}"; 
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg); Echo($"[Recording] Sent: {msg}"); 
+} 
+
+void HandleMaxSpeed(string msg) { 
+    var parts = msg.Split('|'); if (parts.Length < 2) return; 
+    double speed; if (double.TryParse(parts[1], out speed)) { pathMaxSpeed = speed; Echo($"Received max speed: {speed}"); } 
+} 
+
+void HandlePathMessage(string msg) { 
+    var parts = msg.Split('|'); if (parts.Length < 3) return; 
+    pathGPS.Clear(); pathGPSStrings.Clear(); pathOrientations.Clear(); pathCloseEnoughs.Clear(); 
+    int idx = 1; while (idx + 1 < parts.Length) { 
+        string gps = parts[idx++]; string orient = parts[idx++]; pathGPSStrings.Add(gps); pathOrientations.Add(orient); 
+        Vector3D pos; if (TryParseGPS(gps, out pos)) pathGPS.Add(pos); 
+        double closeEnough = CLOSE_ENOUGH_DEFAULT; 
+        if (idx < parts.Length && double.TryParse(parts[idx], out closeEnough)) { pathCloseEnoughs.Add(closeEnough); idx++; } else { pathCloseEnoughs.Add(CLOSE_ENOUGH_DEFAULT); } 
+    } 
+    pathMaxSpeed = -1; IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, "PathfinderMaxSpeedRequest"); Echo("Path stored."); 
+} 
+
+void OutputPathStatus() { 
+    if (lcdPath == null) return; 
+    string outText = isSoftLocked ? $"[LOCKED - STEP {setupStep}]\n" : "";
+    if (pathGPSStrings.Count > 0) { outText += "PATH:\n"; for (int i = 0; i < pathGPSStrings.Count; i++) outText += $"#{i + 1}: {pathGPSStrings[i]} | {pathOrientations[i]}\n"; } 
+    else outText += "No path.\n"; 
+    outText += $"Max Speed: {(pathMaxSpeed >= 0 ? pathMaxSpeed.ToString("0.##") : "N/A")}\n";
+    outText += $"Runtime: {Runtime.LastRunTimeMs:0.000} ms\n";
+    outText += $"Instr: {Runtime.CurrentInstructionCount}/{Runtime.MaxInstructionCount}\n"; 
+    if (recordingActive) outText += recordingPaused ? "[RECORDING PAUSED]\n" : "[RECORDING]\n"; 
+    lcdPath.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE; lcdPath.WriteText(outText); 
+} 
+
+void HandleConfirmedEntry(string msg) { 
+    var parts = msg.Split('|'); if (parts.Length < 4) return; 
+    string output = $"CONFIRMED ENTRY\nName: {parts[1]}\nGPS: {parts[2]}"; 
+    if (lcdConfirm != null) { lcdConfirm.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE; lcdConfirm.WriteText(output); } 
+    if (indicatorLight != null) { indicatorLight.Color = blinkColor; indicatorLight.Enabled = true; blinkRequested = true; blinkTicks = 0; } 
+    if (soundBlock != null) { soundBlock.SelectedSound = "Alert 2"; soundBlock.Play(); } 
+    if (recordingActive) { Vector3D p; if (TryParseGPS(parts[2], out p)) { recordingLastGPS = p; recordingTimer = 0; recordingPaused = false; } } 
+} 
+
+void StopOverrides() { StopThrusterOverrides(); gyroControl?.Reset(); }
+void StopThrusterOverrides() { List<IMyThrust> t = new List<IMyThrust>(); GridTerminalSystem.GetBlocksOfType(t); foreach (var x in t) x.ThrustOverride = 0; }
+
+bool TryParseGPS(string gps, out Vector3D pos) { 
+    pos = Vector3D.Zero; var p = gps.Split(':'); if (p.Length < 5) return false; 
+    return double.TryParse(p[2], out pos.X) && double.TryParse(p[3], out pos.Y) && double.TryParse(p[4], out pos.Z); 
+} 
+
+void GetRotationAngles(Vector3D forward, Vector3D up, out double yaw, out double pitch, out double roll) { 
+    Vector3D left = Vector3D.Cross(up, forward); forward.Normalize(); up.Normalize(); left.Normalize(); 
+    yaw = Math.Atan2(forward.X, forward.Z) * (180 / Math.PI); pitch = Math.Asin(forward.Y) * (180 / Math.PI); roll = Math.Atan2(left.Y, up.Y) * (180 / Math.PI); 
+}
+
+class GyroControl {
+    private List<IMyGyro> gyros; IMyRemoteControl rc; PID X, Y, Z;
+    public GyroControl(IMyRemoteControl rc, List<IMyGyro> gyros) {
+        this.rc = rc; this.gyros = gyros;
+        X = new PID(gyroP, gyroI, gyroD, -gyroMax, gyroMax);
+        Y = new PID(gyroP, gyroI, gyroD, -gyroMax, gyroMax);
+        Z = new PID(gyroP, gyroI, gyroD, -gyroMax, gyroMax);
+    }
+    public void Reset() { foreach (var g in gyros) g.GyroOverride = false; X.Reset(); Y.Reset(); Z.Reset(); }
+    public void FaceVectors(Vector3D f, Vector3D u, double dt) {
+        Vector3D e = -GetAngles(rc.WorldMatrix, f, u);
+        Vector3D outV = new Vector3D(X.Compute(e.X, dt), Y.Compute(e.Y, dt), Z.Compute(e.Z, dt));
+        Vector3D wV = Vector3D.TransformNormal(outV, rc.WorldMatrix);
+        foreach (var g in gyros) {
+            Vector3D l = Vector3D.TransformNormal(wV, MatrixD.Transpose(g.WorldMatrix));
+            g.Pitch = (float)l.X; g.Yaw = (float)l.Y; g.Roll = (float)l.Z; g.GyroOverride = true;
+        }
+    }
+    Vector3D GetAngles(MatrixD m, Vector3D f, Vector3D u) {
+        Vector3D lF = Vector3D.Transform(f, Quaternion.Inverse(Quaternion.CreateFromForwardUp(m.Forward, m.Up)));
+        double y, p; Vector3D.GetAzimuthAndElevation(lF, out y, out p);
+        Vector3D pU = Vector3D.Normalize(u - (Vector3D.Dot(u, m.Forward) * m.Forward));
+        double r = Math.Acos(MathHelper.Clamp(Vector3D.Dot(m.Up, pU), -1, 1));
+        if (Vector3D.Dot(pU, m.Right) > 0) r *= -1;
+        return new Vector3D(p, y, r);
+    }
+}
+class PID {
+    double _kp, _ki, _kd, _min, _max, _int, _lastE; bool _f = true;
+    public PID(double p, double i, double d, double min, double max) { _kp=p; _ki=i; _kd=d; _min=min; _max=max; }
+    public double Compute(double e, double dt) {
+        if (dt <= 0) return 0;
+        _int = MathHelper.Clamp(_int + (e * dt), _min, _max);
+        double der = _f ? 0 : (e - _lastE) / dt; _lastE = e; _f = false;
+        return MathHelper.Clamp((e * _kp) + (_int * _ki) + (der * _kd), _min, _max);
+    }
+    public void Reset() { _int = 0; _lastE = 0; _f = true; }
+}
