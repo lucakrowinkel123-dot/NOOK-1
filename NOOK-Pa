@@ -18,7 +18,7 @@ GyroControl gyroControl;
 bool blinkRequested = false; int blinkTicks = 0; Color blinkColor = new Color(0, 255, 0); 
 bool hasEntry1Target = false;
 Vector3D entry1Target = Vector3D.Zero;
-bool entry1ProximityActive = false;
+bool entry1ProximityEnabled = false;
 const double ENTRY1_RED_DISTANCE = 50.0;
 const double ENTRY1_GREEN_DISTANCE = 5.0;
 
@@ -43,12 +43,11 @@ Vector3D setupPos1 = Vector3D.Zero;
 Vector3D setupPos2 = Vector3D.Zero;
 bool hasLastStaggerPoint = false;
 Vector3D lastStaggerPos = Vector3D.Zero;
-Vector3D lastStaggerForward = Vector3D.Forward;
-Vector3D lastStaggerUp = Vector3D.Up;
+Vector3D autoReturnHoldForward = Vector3D.Forward;
+Vector3D autoReturnHoldUp = Vector3D.Up;
 bool autoReturnToStaggerActive = false;
 const double AUTO_RETURN_CLOSE = 2.0;
 const double AUTO_RETURN_MAX_SPEED = 2.5;
-const double AUTO_RETURN_ORIENT_TOL_DEG = 6.0;
 
 public Program() { 
     Runtime.UpdateFrequency = UpdateFrequency.Update10; 
@@ -97,6 +96,9 @@ public void Main(string argument, UpdateType updateSource) {
             string msg = $"ExcavationSiteSetUpComplete|{orient}|{gpsA}|{gpsB}";
             BroadcastCarrier(msg);
             Echo($"Sent Setup: {msg}");
+            autoReturnHoldForward = lockedMatrix.Forward;
+            autoReturnHoldUp = lockedMatrix.Up;
+            entry1ProximityEnabled = true;
             setupStep = 0; isSoftLocked = false; 
             ConfigureSensorVisuals(false); // TURN OFF VISUAL GUIDE
             StopOverrides();
@@ -133,8 +135,6 @@ public void Main(string argument, UpdateType updateSource) {
             var pos = remote.GetPosition(); 
             if (commandPrefix == "ExcavationSiteStagger") { 
                 lastStaggerPos = pos; 
-                lastStaggerForward = remote.WorldMatrix.Forward;
-                lastStaggerUp = remote.WorldMatrix.Up;
                 hasLastStaggerPoint = true; 
             }
             string gps = $"GPS:Site:{pos.X:F2}:{pos.Y:F2}:{pos.Z:F2}:"; 
@@ -238,39 +238,27 @@ void ApplyAutoReturnToStagger(double dt) {
     Vector3D delta = lastStaggerPos - remote.GetPosition();
     double distance = delta.Length();
     if (distance <= AUTO_RETURN_CLOSE) {
-        gyroControl?.FaceVectors(lastStaggerForward, lastStaggerUp, dt);
-        StopThrusterOverrides();
-        double alignmentDot = MathHelper.Clamp(Vector3D.Dot(remote.WorldMatrix.Forward, Vector3D.Normalize(lastStaggerForward)), -1, 1);
-        double alignmentDeg = Math.Acos(alignmentDot) * 180.0 / Math.PI;
-        if (alignmentDeg > AUTO_RETURN_ORIENT_TOL_DEG) return;
-
         autoReturnToStaggerActive = false;
         StopOverrides(); // release control back to pilot
         if (!recordingActive) StartRecordingMode();
-        Echo("[AutoReturn] Reached stagger point with saved orientation. Pilot control restored. Recording started.");
+        Echo("[AutoReturn] Reached stagger point. Pilot control restored. Recording started.");
         return;
     }
 
-    Vector3D targetForward = Vector3D.Normalize(delta);
-    if (distance <= 8.0)
-        gyroControl?.FaceVectors(lastStaggerForward, lastStaggerUp, dt);
-    else
-        gyroControl?.FaceVectors(targetForward, remote.WorldMatrix.Up, dt);
+    // Keep the excavation-complete orientation for the full move.
+    gyroControl?.FaceVectors(autoReturnHoldForward, autoReturnHoldUp, dt);
 
-    double currentForwardVel = Vector3D.Dot(remote.GetShipVelocities().LinearVelocity, remote.WorldMatrix.Forward);
-    double targetForwardVel = MathHelper.Clamp(distance / 4.0, 0.4, AUTO_RETURN_MAX_SPEED);
-    double velErr = targetForwardVel - currentForwardVel;
+    Vector3D desiredVel = Vector3D.Zero;
+    if (distance > 0.01)
+        desiredVel = Vector3D.Normalize(delta) * MathHelper.Clamp(distance / 4.0, 0.4, AUTO_RETURN_MAX_SPEED);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
 
     List<IMyThrust> thrusters = new List<IMyThrust>(); 
     GridTerminalSystem.GetBlocksOfType(thrusters);
     foreach (var t in thrusters) {
-        if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Backward) > 0.9) {
-            t.ThrustOverride = velErr > 0.05 ? (float)(velErr * 180000) : 0;
-        } else if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Forward) > 0.9) {
-            t.ThrustOverride = velErr < -0.05 ? (float)(Math.Abs(velErr) * 180000) : 0;
-        } else {
-            t.ThrustOverride = 0;
-        }
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
     }
 }
 
@@ -325,21 +313,15 @@ void HandleConfirmedEntry(string msg) {
         Vector3D p;
         if (TryParseGPS(parts[2], out p)) { entry1Target = p; hasEntry1Target = true; }
     }
-    if (parts[1].StartsWith("ExcavationSite", StringComparison.OrdinalIgnoreCase) &&
-        !parts[1].StartsWith("ExcavationSiteEntry", StringComparison.OrdinalIgnoreCase) &&
-        !parts[1].StartsWith("ExcavationSitePath", StringComparison.OrdinalIgnoreCase) &&
-        !parts[1].StartsWith("ExcavationSiteStagger", StringComparison.OrdinalIgnoreCase)) {
-        entry1ProximityActive = true;
-    }
     if (recordingActive) { Vector3D p; if (TryParseGPS(parts[2], out p)) { recordingLastGPS = p; recordingTimer = 0; recordingPaused = false; } } 
 } 
 
 void UpdateEntry1ProximityIndicator() {
-    if (!entry1ProximityActive || !hasEntry1Target || indicatorLight == null || remote == null) return;
+    if (!entry1ProximityEnabled || !hasEntry1Target || indicatorLight == null || remote == null) return;
     double d = Vector3D.Distance(remote.GetPosition(), entry1Target);
+    if (d > ENTRY1_RED_DISTANCE) return; // outside 50m = normal indicator behavior
     double t;
-    if (d >= ENTRY1_RED_DISTANCE) t = 0;
-    else if (d <= ENTRY1_GREEN_DISTANCE) t = 1;
+    if (d <= ENTRY1_GREEN_DISTANCE) t = 1;
     else t = (ENTRY1_RED_DISTANCE - d) / (ENTRY1_RED_DISTANCE - ENTRY1_GREEN_DISTANCE);
     int r = (int)MathHelper.Clamp(255 * (1 - t), 0, 255);
     int g = (int)MathHelper.Clamp(255 * t, 0, 255);
