@@ -1,10 +1,10 @@
-const string LCD_PATH_NAME = "ANOUK-PF LCD 1"; 
-const string LCD_CONFIRM_NAME = "ANOUK-PF LCD 2"; 
-const string INDICATOR_NAME = "ANOUK-PF Indicator Light"; 
-const string SOUND_BLOCK_NAME = "ANOUK-PF Sound Block"; 
-const string SENSOR_TAG = "ANOUK-PF Sensor"; // Ensure your sensor has this name
-const string PATHFINDER_CHANNEL = "ANOUK-Ca_PathFinder_Channel"; 
-const string REMOTE_TAG = "ANOUK-PF Remote Control"; 
+const string LCD_PATH_NAME = "EMM-A PF LCD 1"; 
+const string LCD_CONFIRM_NAME = "EMM-A PF LCD 2"; 
+const string INDICATOR_NAME = "EMM-A PF Indicator Light"; 
+const string SOUND_BLOCK_NAME = "EMM-A PF Sound Block"; 
+const string SENSOR_TAG = "EMM-A PF Sensor"; // Ensure your sensor has this name
+const string PATHFINDER_CHANNEL = "EMM-A Ca_PathFinder_Channel"; 
+const string REMOTE_TAG = "EMM-A PF Remote Control"; 
 const double CLOSE_ENOUGH_DEFAULT = 1.0; 
 
 // PID TUNING FOR STABILITY
@@ -61,7 +61,7 @@ public void Main(string argument, UpdateType updateSource) {
     bool isSendCommand = false; 
 
     // --- NEW 3-STEP SETUP WITH SENSOR VISUALS ---
-    if (cmd.Equals("PF_ExcavationSiteSetUpComplete", StringComparison.OrdinalIgnoreCase)) {
+    if (CmdIs(cmd, "EMMA_ExcavationSiteSetUpComplete", "PF_ExcavationSiteSetUpComplete")) {
         if (remote == null) return;
         setupStep++;
         if (setupStep == 1) {
@@ -89,23 +89,23 @@ public void Main(string argument, UpdateType updateSource) {
     }
 
     // --- STANDARD COMMANDS --- 
-    else if (cmd.Equals("PF_ExcavationSitePathAdd", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "ExcavationSitePathAdd"; isSendCommand = true; } 
-    else if (cmd.Equals("PF_ExcavationSiteStagger", StringComparison.OrdinalIgnoreCase)) { 
+    else if (CmdIs(cmd, "EMMA_ExcavationSitePathAdd", "PF_ExcavationSitePathAdd")) { commandPrefix = "ExcavationSitePathAdd"; isSendCommand = true; } 
+    else if (CmdIs(cmd, "EMMA_ExcavationSiteStagger", "PF_ExcavationSiteStagger")) { 
         commandPrefix = "ExcavationSiteStagger"; isSendCommand = true; 
         if (recordingActive) StopRecordingMode(); 
         ConfigureSensorVisuals(true); // Turn on visuals for stagger alignment
     } 
-    else if (cmd.Equals("PF_ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase)) { 
+    else if (CmdIs(cmd, "EMMA_ExcavationSiteCancel", "PF_ExcavationSiteCancel")) { 
         commandPrefix = "ExcavationSiteCancel"; isSendCommand = true; 
         if (recordingActive) StopRecordingMode();
         isSoftLocked = false; setupStep = 0; 
         ConfigureSensorVisuals(false); // Clean up visuals
         StopOverrides();
     } 
-    else if (cmd.Equals("PF_ReturnRequest", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
-    else if (cmd.Equals("PF_MaxSpeedRequest", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
-    else if (cmd.Equals("PF_ExcavationSitePathStartRecording", StringComparison.OrdinalIgnoreCase)) { StartRecordingMode(); } 
-    else if (cmd.Equals("PF_ExcavationSitePathStopRecording", StringComparison.OrdinalIgnoreCase)) { StopRecordingMode(); } 
+    else if (CmdIs(cmd, "EMMA_ReturnRequest", "PF_ReturnRequest")) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
+    else if (CmdIs(cmd, "EMMA_MaxSpeedRequest", "PF_MaxSpeedRequest")) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
+    else if (CmdIs(cmd, "EMMA_ExcavationSitePathStartRecording", "PF_ExcavationSitePathStartRecording")) { StartRecordingMode(); } 
+    else if (CmdIs(cmd, "EMMA_ExcavationSitePathStopRecording", "PF_ExcavationSitePathStopRecording")) { StopRecordingMode(); } 
 
     // --- SEND COMMAND --- 
     if (isSendCommand) { 
@@ -149,6 +149,11 @@ public void Main(string argument, UpdateType updateSource) {
     } 
     OutputPathStatus(); 
 } 
+
+bool CmdIs(string cmd, string primary, string legacy) {
+    return cmd.Equals(primary, StringComparison.OrdinalIgnoreCase) ||
+           cmd.Equals(legacy, StringComparison.OrdinalIgnoreCase);
+}
 
 // --- SENSOR CONFIGURATION HELPER ---
 void ConfigureSensorVisuals(bool active) {

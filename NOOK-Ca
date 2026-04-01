@@ -1,10 +1,10 @@
-// === ANOUK-Ca (Carrier) Mothership Script ===
+// === EMM-A (Exploration, Mapping & Mining Assistant) Coordinator Script ===
 // Data LCDs: 25 lines per LCD, r195g255b255 font, 0.695 size, 1.0 padding
 
-const string LCD_TAG = "ANOUK-Ca LCD Data";
-const string FIELD_DB_NAME = "ANOUK-Ca A-Field DB";
+const string LCD_TAG = "EMM-A Ca LCD Data";
+const string FIELD_DB_NAME = "EMM-A Ca A-Field DB";
 const int MAX_ASTEROIDS_PER_BLOCK = 5;
-const string PATHFINDER_CHANNEL = "ANOUK-Ca_PathFinder_Channel";
+const string PATHFINDER_CHANNEL = "EMM-A Ca_PathFinder_Channel";
 
 // Lists for asteroid databases and LCDs
 List<IMyTimerBlock> asteroidDatabases = new List<IMyTimerBlock>();
@@ -29,12 +29,12 @@ public void Main(string argument, UpdateType updateSource)
     // --- BLOCK LOOKUPS ---
     // Find remote control, asteroid databases, and field DB for this zone
     List<IMyRemoteControl> remotes = new List<IMyRemoteControl>();
-    GridTerminalSystem.GetBlocksOfType(remotes, r => r.CustomName.Contains("ANOUK-Ca Remote Control"));
+    GridTerminalSystem.GetBlocksOfType(remotes, r => r.CustomName.Contains("EMM-A Ca Remote Control"));
     remote = remotes.Count > 0 ? remotes[0] : null;
     string currentZone = remote != null ? GetAsteroidZone(remote.GetPosition()) : "Unknown";
     asteroidDatabases.Clear();
     GridTerminalSystem.GetBlocksOfType(asteroidDatabases, b =>
-        b.CustomName.StartsWith("ANOUK-Ca " + currentZone + " A-DB HD"));
+        b.CustomName.StartsWith("EMM-A Ca " + currentZone + " A-DB HD"));
     outputLCDs.Clear();
     GridTerminalSystem.GetBlocksOfType(outputLCDs, l => l.CustomName.StartsWith(LCD_TAG));
     outputLCDs.Sort((a, b) => a.CustomName.CompareTo(b.CustomName));
@@ -43,7 +43,7 @@ public void Main(string argument, UpdateType updateSource)
     fieldDatabase = fieldBlocks.Count > 0 ? fieldBlocks[0] : null;
 
     // --- SAFETY CHECKS ---
-    if (remote == null) { Echo("ANOUK-Ca Remote Control not found"); return; }
+    if (remote == null) { Echo("EMM-A Ca Remote Control not found"); return; }
     if (fieldDatabase == null) { Echo("Field database block not found."); return; }
     if (asteroidDatabases.Count == 0) { Echo("No asteroid database blocks found for zone: " + currentZone); return; }
 
