@@ -4,6 +4,7 @@ const string INDICATOR_NAME = "EMM-A PF Indicator Light";
 const string SOUND_BLOCK_NAME = "EMM-A PF Sound Block"; 
 const string SENSOR_TAG = "EMM-A PF Sensor"; // Ensure your sensor has this name
 const string PATHFINDER_CHANNEL = "EMM-A Ca_PathFinder_Channel"; 
+const string PATHFINDER_CHANNEL_LEGACY = "ANOUK-Ca_PathFinder_Channel";
 const string REMOTE_TAG = "EMM-A PF Remote Control"; 
 const double CLOSE_ENOUGH_DEFAULT = 1.0; 
 
@@ -39,6 +40,7 @@ Vector3D setupPos2 = Vector3D.Zero;
 public Program() { 
     Runtime.UpdateFrequency = UpdateFrequency.Update10; 
     IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL); 
+    IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL_LEGACY);
 } 
 
 public void Main(string argument, UpdateType updateSource) { 
@@ -80,7 +82,7 @@ public void Main(string argument, UpdateType updateSource) {
             string gpsA = $"GPS:CornerA:{setupPos1.X:F2}:{setupPos1.Y:F2}:{setupPos1.Z:F2}:";
             string gpsB = $"GPS:CornerB:{setupPos2.X:F2}:{setupPos2.Y:F2}:{setupPos2.Z:F2}:";
             string msg = $"ExcavationSiteSetUpComplete|{orient}|{gpsA}|{gpsB}";
-            IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg);
+            BroadcastCarrier(msg);
             Echo($"Sent Setup: {msg}");
             setupStep = 0; isSoftLocked = false; 
             ConfigureSensorVisuals(false); // TURN OFF VISUAL GUIDE
@@ -118,7 +120,7 @@ public void Main(string argument, UpdateType updateSource) {
             string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
             msg = $"{commandPrefix}|{gps}|{orient}"; 
         } else { msg = commandPrefix; } 
-        IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg); Echo($"Sent: {msg}"); 
+        BroadcastCarrier(msg); Echo($"Sent: {msg}"); 
     } 
 
     // --- IGC LISTENING --- 
@@ -203,7 +205,7 @@ void SendPFExcavationSitePathAdd() {
     double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
     string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
     string msg = $"ExcavationSitePathAdd|{gps}|{orient}"; 
-    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg); Echo($"[Recording] Sent: {msg}"); 
+    BroadcastCarrier(msg); Echo($"[Recording] Sent: {msg}"); 
 } 
 
 void HandleMaxSpeed(string msg) { 
@@ -220,7 +222,7 @@ void HandlePathMessage(string msg) {
         double closeEnough = CLOSE_ENOUGH_DEFAULT; 
         if (idx < parts.Length && double.TryParse(parts[idx], out closeEnough)) { pathCloseEnoughs.Add(closeEnough); idx++; } else { pathCloseEnoughs.Add(CLOSE_ENOUGH_DEFAULT); } 
     } 
-    pathMaxSpeed = -1; IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, "PathfinderMaxSpeedRequest"); Echo("Path stored."); 
+    pathMaxSpeed = -1; BroadcastCarrier("PathfinderMaxSpeedRequest"); Echo("Path stored."); 
 } 
 
 void OutputPathStatus() { 
@@ -255,6 +257,11 @@ bool TryParseGPS(string gps, out Vector3D pos) {
 void GetRotationAngles(Vector3D forward, Vector3D up, out double yaw, out double pitch, out double roll) { 
     Vector3D left = Vector3D.Cross(up, forward); forward.Normalize(); up.Normalize(); left.Normalize(); 
     yaw = Math.Atan2(forward.X, forward.Z) * (180 / Math.PI); pitch = Math.Asin(forward.Y) * (180 / Math.PI); roll = Math.Atan2(left.Y, up.Y) * (180 / Math.PI); 
+}
+
+void BroadcastCarrier(string message) {
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, message);
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL_LEGACY, message);
 }
 
 class GyroControl {
