@@ -38,9 +38,12 @@ Vector3D setupPos1 = Vector3D.Zero;
 Vector3D setupPos2 = Vector3D.Zero;
 bool hasLastStaggerPoint = false;
 Vector3D lastStaggerPos = Vector3D.Zero;
+Vector3D lastStaggerForward = Vector3D.Forward;
+Vector3D lastStaggerUp = Vector3D.Up;
 bool autoReturnToStaggerActive = false;
 const double AUTO_RETURN_CLOSE = 2.0;
 const double AUTO_RETURN_MAX_SPEED = 2.5;
+const double AUTO_RETURN_ORIENT_TOL_DEG = 6.0;
 
 public Program() { 
     Runtime.UpdateFrequency = UpdateFrequency.Update10; 
@@ -123,7 +126,12 @@ public void Main(string argument, UpdateType updateSource) {
         if (commandPrefix == "ExcavationSitePathAdd" || commandPrefix == "ExcavationSiteStagger") { 
             if (remote == null) { Echo("No remote found!"); return; } 
             var pos = remote.GetPosition(); 
-            if (commandPrefix == "ExcavationSiteStagger") { lastStaggerPos = pos; hasLastStaggerPoint = true; }
+            if (commandPrefix == "ExcavationSiteStagger") { 
+                lastStaggerPos = pos; 
+                lastStaggerForward = remote.WorldMatrix.Forward;
+                lastStaggerUp = remote.WorldMatrix.Up;
+                hasLastStaggerPoint = true; 
+            }
             string gps = $"GPS:Site:{pos.X:F2}:{pos.Y:F2}:{pos.Z:F2}:"; 
             double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
             string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
@@ -224,15 +232,24 @@ void ApplyAutoReturnToStagger(double dt) {
     Vector3D delta = lastStaggerPos - remote.GetPosition();
     double distance = delta.Length();
     if (distance <= AUTO_RETURN_CLOSE) {
+        gyroControl?.FaceVectors(lastStaggerForward, lastStaggerUp, dt);
+        StopThrusterOverrides();
+        double alignmentDot = MathHelper.Clamp(Vector3D.Dot(remote.WorldMatrix.Forward, Vector3D.Normalize(lastStaggerForward)), -1, 1);
+        double alignmentDeg = Math.Acos(alignmentDot) * 180.0 / Math.PI;
+        if (alignmentDeg > AUTO_RETURN_ORIENT_TOL_DEG) return;
+
         autoReturnToStaggerActive = false;
         StopOverrides(); // release control back to pilot
         if (!recordingActive) StartRecordingMode();
-        Echo("[AutoReturn] Reached stagger point. Pilot control restored. Recording started.");
+        Echo("[AutoReturn] Reached stagger point with saved orientation. Pilot control restored. Recording started.");
         return;
     }
 
     Vector3D targetForward = Vector3D.Normalize(delta);
-    gyroControl?.FaceVectors(targetForward, remote.WorldMatrix.Up, dt);
+    if (distance <= 8.0)
+        gyroControl?.FaceVectors(lastStaggerForward, lastStaggerUp, dt);
+    else
+        gyroControl?.FaceVectors(targetForward, remote.WorldMatrix.Up, dt);
 
     double currentForwardVel = Vector3D.Dot(remote.GetShipVelocities().LinearVelocity, remote.WorldMatrix.Forward);
     double targetForwardVel = MathHelper.Clamp(distance / 4.0, 0.4, AUTO_RETURN_MAX_SPEED);

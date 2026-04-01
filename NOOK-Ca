@@ -96,14 +96,13 @@ public void Main(string argument, UpdateType updateSource)
             Echo("Another asteroid is already in setup."); return;
         }
         BeginAsteroidSetup();
-        RunAutoExcavationSiteEntry();
+        RunAutoExcavationSiteEntry(); // only used for first site
         return;
     }
     else if (argument.Equals("ExcavationSiteNextPath", StringComparison.OrdinalIgnoreCase))
     {
-        // Advance to next site slot, auto-enter
+        // Advance to next site slot
         currentSiteN++; 
-        RunAutoExcavationSiteEntry();
         return;
     }
     else if (argument.Equals("ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase))
@@ -525,11 +524,9 @@ void SaveExcavationSitePath(string arg)
     string orient = parts[2];
 
     MyIni ini; string section; if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
-    if (n == 0) { Echo("No site entry found!"); return; }
+    int n = currentSiteN;
+    if (n == 1 && !ini.ContainsKey(section, "ExcavationSiteEntry1")) { Echo("Set entry first for site 1."); return; }
 
-    string entryField = $"ExcavationSiteEntry{n}";
-    if (!ini.ContainsKey(section, entryField)) { Echo("Set entry first."); return; }
     string nextPathField = null;
     int pathIdx = 1;
     for (; ; pathIdx++)
@@ -556,7 +553,7 @@ void SaveExcavationSiteStagger(string arg)
     string orient = parts[2];
 
     MyIni ini; string section; if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
+    int n = currentSiteN;
     string path1 = $"ExcavationSitePath{n}_1";
     if (!ini.ContainsKey(section, path1)) { Echo("Add at least one path point before stagger."); return; }
     string field = $"ExcavationSiteStagger{n}";
@@ -581,7 +578,7 @@ void SaveExcavationSite(string arg)
     string cornerB = parts[3];
 
     MyIni ini; string section; if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
+    int n = currentSiteN;
     string stagger = $"ExcavationSiteStagger{n}";
     if (!ini.ContainsKey(section, stagger)) { Echo("Set stagger before final site."); return; }
     string field = $"ExcavationSite{n}";
@@ -601,28 +598,8 @@ lastConfirmedOrient = orientation;
 Main("SendConfirm", UpdateType.Script);
 
 // --- ADVANCE TO NEXT SITE CONTEXT ---
-int newN = n + 1;
-
-string previousEntryField = $"ExcavationSiteEntry{n}";
-string nextEntryField = $"ExcavationSiteEntry{newN}";
-
-// Copy previous entry into new entry slot
-if (ini.ContainsKey(section, previousEntryField))
-{
-    string previousEntryValue = ini.Get(section, previousEntryField).ToString();
-
-    if (!ini.ContainsKey(section, nextEntryField))
-    {
-        ini.Set(section, nextEntryField, previousEntryValue);
-    }
-}
-
-// Save updated INI
-SetCurrentAsteroidIni(ini, section);
-
-currentSiteN = newN;
-
-Echo($"Site {n} complete. {nextEntryField} copied from {previousEntryField}.");
+currentSiteN = n + 1;
+Echo($"Site {n} complete. Ready for site {currentSiteN}.");
 }
 
 // --- ASTEROID INI ACCESS HELPERS ---
@@ -672,17 +649,14 @@ void CancelLastExcavationSiteEntry()
 {
     MyIni ini; string section;
     if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
-    if (n == 0)
+    int n = Math.Max(1, currentSiteN - 1);
+    if (!ini.ContainsKey(section, $"ExcavationSite{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSiteStagger{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSitePath{n}_1"))
     {
         Echo("No previous entry to cancel.");
         return;
     }
-
-    // Delete ExcavationSiteEntryN
-    string entryKey = $"ExcavationSiteEntry{n}";
-    if (ini.ContainsKey(section, entryKey))
-        ini.Delete(section, entryKey);
 
     // Delete all ExcavationSitePathN_*
     int pathIdx = 1;
@@ -702,10 +676,14 @@ void CancelLastExcavationSiteEntry()
     if (ini.ContainsKey(section, siteKey))
         ini.Delete(section, siteKey);
 
+    // First site may include an entry key
+    if (n == 1 && ini.ContainsKey(section, "ExcavationSiteEntry1"))
+        ini.Delete(section, "ExcavationSiteEntry1");
+
     SetCurrentAsteroidIni(ini, section);
 
-    currentSiteN = n; // Step back to previous
-    Echo($"Excavation site entry {n} canceled (entry, path, stagger, site removed).");
+    currentSiteN = n; // Step back to canceled site index
+    Echo($"Excavation site {n} canceled (path, stagger, site removed).");
 }
 
 // --- IGC HANDLER ---
@@ -736,8 +714,14 @@ void SendReturnPath()
 {
     MyIni ini; string section;
     if (!GetCurrentAsteroidIni(out ini, out section)) { Echo("No asteroid setup."); return; }
-    int n = GetLatestSiteN(ini, section);
-    if (n == 0) { Echo("No site entry."); return; }
+    int n = Math.Max(1, currentSiteN - 1);
+    if (!ini.ContainsKey(section, $"ExcavationSite{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSiteStagger{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSitePath{n}_1"))
+    {
+        Echo("No site data.");
+        return;
+    }
 
     // Read close distances from field DB Settings
     MyIni fieldIni = new MyIni();
@@ -747,8 +731,8 @@ void SendReturnPath()
     double staggerClose = fieldIni.Get("Settings", "StaggerCloseDistance").ToDouble(0.5);
     double siteClose = fieldIni.Get("Settings", "SiteCloseDistance").ToDouble(0.5);
 
-    // Gather: Entry, Stagger, Paths (orientations included)
-    string entry = ini.Get(section, $"ExcavationSiteEntry{n}").ToString();
+    // Gather: (optional first-site Entry), Stagger, Paths, Site (orientations included)
+    string entry = (n == 1 && ini.ContainsKey(section, "ExcavationSiteEntry1")) ? ini.Get(section, "ExcavationSiteEntry1").ToString() : "";
     string stagger = ini.ContainsKey(section, $"ExcavationSiteStagger{n}") ? ini.Get(section, $"ExcavationSiteStagger{n}").ToString() : "";
     string site = ini.ContainsKey(section, $"ExcavationSite{n}") ? ini.Get(section, $"ExcavationSite{n}").ToString() : "";
     List<string> pathList = new List<string>();
