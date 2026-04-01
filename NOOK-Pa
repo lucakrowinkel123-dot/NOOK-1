@@ -16,6 +16,11 @@ IMySensorBlock sensor; // Added sensor reference
 GyroControl gyroControl;
 
 bool blinkRequested = false; int blinkTicks = 0; Color blinkColor = new Color(0, 255, 0); 
+bool hasEntry1Target = false;
+Vector3D entry1Target = Vector3D.Zero;
+bool entry1ProximityActive = false;
+const double ENTRY1_RED_DISTANCE = 50.0;
+const double ENTRY1_GREEN_DISTANCE = 5.0;
 
 // Path data 
 List<Vector3D> pathGPS = new List<Vector3D>(); 
@@ -155,6 +160,7 @@ public void Main(string argument, UpdateType updateSource) {
 
     // --- BLINK --- 
     if (blinkRequested && indicatorLight != null) { blinkTicks++; if (blinkTicks >= 5) { indicatorLight.Enabled = false; blinkRequested = false; } } 
+    if (!blinkRequested) UpdateEntry1ProximityIndicator();
 
     // --- SOFT LOCK & RECORDING LOGIC --- 
     if (isSoftLocked && remote != null) ApplySoftLock(deltaTime);
@@ -315,8 +321,31 @@ void HandleConfirmedEntry(string msg) {
     if (lcdConfirm != null) { lcdConfirm.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE; lcdConfirm.WriteText(output); } 
     if (indicatorLight != null) { indicatorLight.Color = blinkColor; indicatorLight.Enabled = true; blinkRequested = true; blinkTicks = 0; } 
     if (soundBlock != null) { soundBlock.SelectedSound = "Alert 2"; soundBlock.Play(); } 
+    if (parts[1].Equals("ExcavationSiteEntry1", StringComparison.OrdinalIgnoreCase)) {
+        Vector3D p;
+        if (TryParseGPS(parts[2], out p)) { entry1Target = p; hasEntry1Target = true; }
+    }
+    if (parts[1].StartsWith("ExcavationSite", StringComparison.OrdinalIgnoreCase) &&
+        !parts[1].StartsWith("ExcavationSiteEntry", StringComparison.OrdinalIgnoreCase) &&
+        !parts[1].StartsWith("ExcavationSitePath", StringComparison.OrdinalIgnoreCase) &&
+        !parts[1].StartsWith("ExcavationSiteStagger", StringComparison.OrdinalIgnoreCase)) {
+        entry1ProximityActive = true;
+    }
     if (recordingActive) { Vector3D p; if (TryParseGPS(parts[2], out p)) { recordingLastGPS = p; recordingTimer = 0; recordingPaused = false; } } 
 } 
+
+void UpdateEntry1ProximityIndicator() {
+    if (!entry1ProximityActive || !hasEntry1Target || indicatorLight == null || remote == null) return;
+    double d = Vector3D.Distance(remote.GetPosition(), entry1Target);
+    double t;
+    if (d >= ENTRY1_RED_DISTANCE) t = 0;
+    else if (d <= ENTRY1_GREEN_DISTANCE) t = 1;
+    else t = (ENTRY1_RED_DISTANCE - d) / (ENTRY1_RED_DISTANCE - ENTRY1_GREEN_DISTANCE);
+    int r = (int)MathHelper.Clamp(255 * (1 - t), 0, 255);
+    int g = (int)MathHelper.Clamp(255 * t, 0, 255);
+    indicatorLight.Color = new Color(r, g, 0);
+    indicatorLight.Enabled = true;
+}
 
 void StopOverrides() { StopThrusterOverrides(); gyroControl?.Reset(); }
 void StopThrusterOverrides() { List<IMyThrust> t = new List<IMyThrust>(); GridTerminalSystem.GetBlocksOfType(t); foreach (var x in t) x.ThrustOverride = 0; }
