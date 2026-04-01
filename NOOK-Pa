@@ -36,6 +36,11 @@ MatrixD lockedMatrix;
 int setupStep = 0;
 Vector3D setupPos1 = Vector3D.Zero;
 Vector3D setupPos2 = Vector3D.Zero;
+bool hasLastStaggerPoint = false;
+Vector3D lastStaggerPos = Vector3D.Zero;
+bool autoReturnToStaggerActive = false;
+const double AUTO_RETURN_CLOSE = 2.0;
+const double AUTO_RETURN_MAX_SPEED = 2.5;
 
 public Program() { 
     Runtime.UpdateFrequency = UpdateFrequency.Update10; 
@@ -87,6 +92,7 @@ public void Main(string argument, UpdateType updateSource) {
             setupStep = 0; isSoftLocked = false; 
             ConfigureSensorVisuals(false); // TURN OFF VISUAL GUIDE
             StopOverrides();
+            StartAutoReturnToStagger();
         }
     }
 
@@ -100,12 +106,14 @@ public void Main(string argument, UpdateType updateSource) {
     else if (CmdIs(cmd, "EMMA_ExcavationSiteCancel", "PF_ExcavationSiteCancel")) { 
         commandPrefix = "ExcavationSiteCancel"; isSendCommand = true; 
         if (recordingActive) StopRecordingMode();
+        autoReturnToStaggerActive = false;
         isSoftLocked = false; setupStep = 0; 
         ConfigureSensorVisuals(false); // Clean up visuals
         StopOverrides();
     } 
     else if (CmdIs(cmd, "EMMA_ReturnRequest", "PF_ReturnRequest")) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
     else if (CmdIs(cmd, "EMMA_MaxSpeedRequest", "PF_MaxSpeedRequest")) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
+    else if (CmdIs(cmd, "EMMA_AsteroidSetUpComplete", "PF_AsteroidSetUpComplete")) { commandPrefix = "AsteroidSetUpComplete"; isSendCommand = true; }
     else if (CmdIs(cmd, "EMMA_ExcavationSitePathStartRecording", "PF_ExcavationSitePathStartRecording")) { StartRecordingMode(); } 
     else if (CmdIs(cmd, "EMMA_ExcavationSitePathStopRecording", "PF_ExcavationSitePathStopRecording")) { StopRecordingMode(); } 
 
@@ -115,6 +123,7 @@ public void Main(string argument, UpdateType updateSource) {
         if (commandPrefix == "ExcavationSitePathAdd" || commandPrefix == "ExcavationSiteStagger") { 
             if (remote == null) { Echo("No remote found!"); return; } 
             var pos = remote.GetPosition(); 
+            if (commandPrefix == "ExcavationSiteStagger") { lastStaggerPos = pos; hasLastStaggerPoint = true; }
             string gps = $"GPS:Site:{pos.X:F2}:{pos.Y:F2}:{pos.Z:F2}:"; 
             double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
             string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
@@ -141,6 +150,7 @@ public void Main(string argument, UpdateType updateSource) {
 
     // --- SOFT LOCK & RECORDING LOGIC --- 
     if (isSoftLocked && remote != null) ApplySoftLock(deltaTime);
+    if (autoReturnToStaggerActive && remote != null) ApplyAutoReturnToStagger(deltaTime);
 
     if (recordingActive && !recordingPaused && remote != null) { 
         recordingTimer += deltaTime; 
@@ -194,6 +204,51 @@ void ApplySoftLock(double dt) {
             if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Forward) > 0.9) t.ThrustOverride = vErr < -0.05 ? (float)(Math.Abs(vErr) * 180000) : 0;
         }
     } else StopThrusterOverrides();
+}
+
+void StartAutoReturnToStagger() {
+    if (!hasLastStaggerPoint || remote == null) return;
+    autoReturnToStaggerActive = true;
+    Echo("[AutoReturn] Navigating to stagger point...");
+}
+
+void ApplyAutoReturnToStagger(double dt) {
+    if (remote == null) return;
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        autoReturnToStaggerActive = false;
+        StopOverrides();
+        Echo("[AutoReturn] Canceled by pilot input.");
+        return;
+    }
+
+    Vector3D delta = lastStaggerPos - remote.GetPosition();
+    double distance = delta.Length();
+    if (distance <= AUTO_RETURN_CLOSE) {
+        autoReturnToStaggerActive = false;
+        StopOverrides(); // release control back to pilot
+        if (!recordingActive) StartRecordingMode();
+        Echo("[AutoReturn] Reached stagger point. Pilot control restored. Recording started.");
+        return;
+    }
+
+    Vector3D targetForward = Vector3D.Normalize(delta);
+    gyroControl?.FaceVectors(targetForward, remote.WorldMatrix.Up, dt);
+
+    double currentForwardVel = Vector3D.Dot(remote.GetShipVelocities().LinearVelocity, remote.WorldMatrix.Forward);
+    double targetForwardVel = MathHelper.Clamp(distance / 4.0, 0.4, AUTO_RETURN_MAX_SPEED);
+    double velErr = targetForwardVel - currentForwardVel;
+
+    List<IMyThrust> thrusters = new List<IMyThrust>(); 
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Backward) > 0.9) {
+            t.ThrustOverride = velErr > 0.05 ? (float)(velErr * 180000) : 0;
+        } else if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Forward) > 0.9) {
+            t.ThrustOverride = velErr < -0.05 ? (float)(Math.Abs(velErr) * 180000) : 0;
+        } else {
+            t.ThrustOverride = 0;
+        }
+    }
 }
 
 void StartRecordingMode() { recordingActive = true; recordingPaused = true; recordingTimer = 0; recordingLastGPS = remote != null ? remote.GetPosition() : Vector3D.Zero; SendPFExcavationSitePathAdd(); Echo("[Recording Mode] Started."); } 
