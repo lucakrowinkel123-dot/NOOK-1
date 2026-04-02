@@ -50,6 +50,9 @@ Vector3D undockHoldForward = Vector3D.Forward;
 Vector3D undockHoldUp = Vector3D.Up;
 Vector3D liveConnectorTarget = Vector3D.Zero;
 bool hasLiveConnectorTarget = false;
+Vector3D liveConnectorForward = Vector3D.Forward;
+Vector3D liveConnectorUp = Vector3D.Up;
+bool hasLiveConnectorOrientation = false;
 double dockRefreshTimer = 0;
 double undockLiveRefreshTimer = 0;
 const double UNDOCK_DISTANCE = 25.0;
@@ -149,6 +152,7 @@ public void Main(string argument, UpdateType updateSource) {
         undockToEntryActive = false;
         dockActive = false;
         pendingDockStart = false;
+        hasLiveConnectorOrientation = false;
         undockLiveRefreshTimer = 0;
         undoReturnTargets.Clear(); undoReturnForwards.Clear(); undoReturnUps.Clear(); undoReturnTargetIndex = 0;
         currentSitePathPoints.Clear(); currentSitePathForwards.Clear(); currentSitePathUps.Clear();
@@ -552,7 +556,14 @@ void ApplyDock(double dt)
         }
     }
 
-    gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
+    if (connector != null && hasLiveConnectorOrientation) {
+        MatrixD cDesired = MatrixD.CreateWorld(Vector3D.Zero, -liveConnectorForward, liveConnectorUp);
+        MatrixD localConnector = MatrixD.Multiply(connector.WorldMatrix, MatrixD.Transpose(remote.WorldMatrix));
+        MatrixD rDesired = MatrixD.Multiply(cDesired, MatrixD.Transpose(localConnector));
+        gyroControl?.FaceVectors(rDesired.Forward, rDesired.Up, dt);
+    } else {
+        gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
+    }
 
     if (distance <= 1.5) {
         dockActive = false;
@@ -685,6 +696,11 @@ void HandleLiveDockData(string msg)
         entry1Up = u;
     }
     if (TryParseGPS(parts[3], out p)) { liveConnectorTarget = p; hasLiveConnectorTarget = true; }
+    if (parts.Length >= 8 && TryParseVector3(parts[6], out f) && TryParseVector3(parts[7], out u)) {
+        liveConnectorForward = Vector3D.Normalize(f);
+        liveConnectorUp = Vector3D.Normalize(u);
+        hasLiveConnectorOrientation = true;
+    }
     if (pendingDockStart) StartDock();
 }
 
@@ -754,6 +770,9 @@ void ResetPathfinder(bool sendCarrierReset) {
     pendingDockStart = false;
     hasLiveConnectorTarget = false;
     liveConnectorTarget = Vector3D.Zero;
+    hasLiveConnectorOrientation = false;
+    liveConnectorForward = Vector3D.Forward;
+    liveConnectorUp = Vector3D.Up;
     dockRefreshTimer = 0;
     undockLiveRefreshTimer = 0;
     undockStartPos = Vector3D.Zero;

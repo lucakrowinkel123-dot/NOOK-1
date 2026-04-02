@@ -874,7 +874,11 @@ void SendLiveDockData()
     Vector3D u = remote.WorldMatrix.Up;
     string fwdVec = $"{f.X:F4},{f.Y:F4},{f.Z:F4}";
     string upVec = $"{u.X:F4},{u.Y:F4},{u.Z:F4}";
-    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}|{fwdVec}|{upVec}");
+    Vector3D cf = carrierConnector != null ? carrierConnector.WorldMatrix.Forward : remote.WorldMatrix.Forward;
+    Vector3D cu = carrierConnector != null ? carrierConnector.WorldMatrix.Up : remote.WorldMatrix.Up;
+    string connFwdVec = $"{cf.X:F4},{cf.Y:F4},{cf.Z:F4}";
+    string connUpVec = $"{cu.X:F4},{cu.Y:F4},{cu.Z:F4}";
+    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}|{fwdVec}|{upVec}|{connFwdVec}|{connUpVec}");
 }
 
 void ResetCarrierState()
