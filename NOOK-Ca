@@ -878,7 +878,13 @@ void SendLiveDockData()
     Vector3D cu = carrierConnector != null ? carrierConnector.WorldMatrix.Up : remote.WorldMatrix.Up;
     string connFwdVec = $"{cf.X:F4},{cf.Y:F4},{cf.Z:F4}";
     string connUpVec = $"{cu.X:F4},{cu.Y:F4},{cu.Z:F4}";
-    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}|{fwdVec}|{upVec}|{connFwdVec}|{connUpVec}");
+    double approachDistance = 25.0;
+    if (fieldDatabase != null) {
+        MyIni ini = new MyIni();
+        if (ini.TryParse(fieldDatabase.CustomData))
+            approachDistance = ini.Get("Settings", "PathfinderConnectorApproachDistance").ToDouble(25.0);
+    }
+    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}|{fwdVec}|{upVec}|{connFwdVec}|{connUpVec}|{approachDistance:F2}");
 }
 
 void ResetCarrierState()

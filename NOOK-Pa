@@ -56,11 +56,9 @@ Vector3D liveConnectorUp = Vector3D.Up;
 bool hasLiveConnectorOrientation = false;
 double dockRefreshTimer = 0;
 double undockLiveRefreshTimer = 0;
-const double UNDOCK_DISTANCE = 25.0;
-const double DOCK_STRAIGHT_DISTANCE = 25.0;
+double connectorApproachDistance = 25.0;
 const double DOCK_REFRESH_DISTANCE = 40.0;
 Vector3D dockStraightStartPos = Vector3D.Zero;
-Vector3D dockStraightDir = Vector3D.Forward;
 Vector3D dockHoldForward = Vector3D.Forward;
 Vector3D dockHoldUp = Vector3D.Up;
 
@@ -454,20 +452,20 @@ void ApplyUndock(double dt) {
     gyroControl?.FaceVectors(holdF, holdU, dt);
     Vector3D traveled = remote.GetPosition() - undockStartPos;
     double progress = Vector3D.Dot(traveled, undockMoveDir);
-    if (progress >= UNDOCK_DISTANCE) {
+    if (progress >= connectorApproachDistance) {
         undockActive = false;
         StopThrusterOverrides();
         if (hasEntry1Target) {
             undockToEntryActive = true;
-            Echo("[Undock] Completed 25m. Continuing to Entry1.");
+            Echo($"[Undock] Completed {connectorApproachDistance:0.##}m. Continuing to Entry1.");
         } else {
             StopOverrides();
-            Echo("[Undock] Completed 25m straight departure (no Entry1 target).");
+            Echo($"[Undock] Completed {connectorApproachDistance:0.##}m straight departure (no Entry1 target).");
         }
         return;
     }
 
-    double remaining = UNDOCK_DISTANCE - progress;
+    double remaining = connectorApproachDistance - progress;
     Vector3D desiredVel = undockMoveDir * MathHelper.Clamp(remaining / 4.0, 0.4, 1.6);
     Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
     List<IMyThrust> thrusters = new List<IMyThrust>();
@@ -534,13 +532,11 @@ void StartDock()
     dockHoldForward = remote.WorldMatrix.Forward;
     dockHoldUp = remote.WorldMatrix.Up;
     dockStraightStartPos = remote.GetPosition();
-    Vector3D toConn = liveConnectorTarget - dockStraightStartPos;
-    dockStraightDir = toConn.LengthSquared() > 0.0001 ? Vector3D.Normalize(toConn) : Vector3D.Normalize(remote.WorldMatrix.Forward);
     dockStraightActive = true;
     dockActive = false;
     pendingDockStart = false;
     dockRefreshTimer = 0;
-    Echo("[Dock] Starting 25m straight-in approach.");
+    Echo($"[Dock] Starting staging approach ({connectorApproachDistance:0.##}m).");
 }
 
 void ApplyDockStraight(double dt)
@@ -553,19 +549,20 @@ void ApplyDockStraight(double dt)
         return;
     }
 
-    gyroControl?.FaceVectors(dockHoldForward, dockHoldUp, dt);
-    Vector3D traveled = remote.GetPosition() - dockStraightStartPos;
-    double progress = Vector3D.Dot(traveled, dockStraightDir);
-    if (progress >= DOCK_STRAIGHT_DISTANCE) {
+    Vector3D stageDir = hasLiveConnectorOrientation ? liveConnectorForward : entry1Forward;
+    Vector3D stagePoint = liveConnectorTarget + (Vector3D.Normalize(stageDir) * connectorApproachDistance);
+    Vector3D toStage = stagePoint - remote.GetPosition();
+    double progress = toStage.Length();
+    gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
+    if (progress <= 2.0) {
         dockStraightActive = false;
         dockActive = true;
         StopThrusterOverrides();
-        Echo("[Dock] Straight approach complete. Final connector approach.");
+        Echo("[Dock] Staging point reached. Final connector approach.");
         return;
     }
 
-    double remaining = DOCK_STRAIGHT_DISTANCE - progress;
-    Vector3D desiredVel = dockStraightDir * MathHelper.Clamp(remaining / 4.0, 0.25, 1.6);
+    Vector3D desiredVel = Vector3D.Normalize(toStage) * MathHelper.Clamp(progress / 4.0, 0.25, 1.6);
     Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
     List<IMyThrust> thrusters = new List<IMyThrust>();
     GridTerminalSystem.GetBlocksOfType(thrusters);
@@ -742,6 +739,10 @@ void HandleLiveDockData(string msg)
         liveConnectorForward = Vector3D.Normalize(f);
         liveConnectorUp = Vector3D.Normalize(u);
         hasLiveConnectorOrientation = true;
+    }
+    if (parts.Length >= 9) {
+        double d;
+        if (double.TryParse(parts[8], out d) && d >= 5.0) connectorApproachDistance = d;
     }
     if (pendingDockStart) StartDock();
 }
