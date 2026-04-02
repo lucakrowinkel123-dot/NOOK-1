@@ -9,6 +9,8 @@ const string PATHFINDER_CHANNEL = "EMM-A Ca_PathFinder_Channel";
 const string PATHFINDER_CHANNEL_LEGACY = "ANOUK-Ca_PathFinder_Channel";
 const string REMOTE_NAME = "EMM-A Ca Remote Control";
 const string REMOTE_NAME_LEGACY = "ANOUK-Ca Remote Control";
+const string CONNECTOR_NAME = "EMM-A Ca Connector";
+const string CONNECTOR_NAME_LEGACY = "ANOUK-Ca Connector";
 const string ASTEROID_DB_PREFIX = "EMM-A Ca ";
 const string ASTEROID_DB_PREFIX_LEGACY = "ANOUK-Ca ";
 
@@ -17,6 +19,7 @@ List<IMyTimerBlock> asteroidDatabases = new List<IMyTimerBlock>();
 List<IMyTextPanel> outputLCDs = new List<IMyTextPanel>();
 IMyRemoteControl remote;
 IMyTimerBlock fieldDatabase;
+IMyShipConnector carrierConnector;
 
 // Internal state variables for site setup
 int currentSiteN = 1;
@@ -43,6 +46,11 @@ public void Main(string argument, UpdateType updateSource)
         b.CustomName.IndexOf(FIELD_DB_NAME, StringComparison.OrdinalIgnoreCase) >= 0 ||
         b.CustomName.IndexOf(FIELD_DB_NAME_LEGACY, StringComparison.OrdinalIgnoreCase) >= 0);
     fieldDatabase = fieldBlocks.Count > 0 ? fieldBlocks[0] : null;
+    List<IMyShipConnector> connectors = new List<IMyShipConnector>();
+    GridTerminalSystem.GetBlocksOfType(connectors, c =>
+        c.CustomName.IndexOf(CONNECTOR_NAME, StringComparison.OrdinalIgnoreCase) >= 0 ||
+        c.CustomName.IndexOf(CONNECTOR_NAME_LEGACY, StringComparison.OrdinalIgnoreCase) >= 0);
+    carrierConnector = connectors.Count > 0 ? connectors[0] : null;
 
     // --- SAFETY CHECKS ---
     if (remote == null) { Echo("EMM-A Ca/ANOUK-Ca Remote Control not found"); return; }
@@ -80,6 +88,11 @@ public void Main(string argument, UpdateType updateSource)
     {
         // Send max speed setting to pathfinder
         SendPathfinderMaxSpeed();
+        return;
+    }
+    if (argument.Equals("LiveDockDataRequest", StringComparison.OrdinalIgnoreCase))
+    {
+        SendLiveDockData();
         return;
     }
     if (argument.Equals("Reset", StringComparison.OrdinalIgnoreCase))
@@ -715,6 +728,7 @@ void ProcessPathfinderMessage(string s)
     if (s.StartsWith("ExcavationSiteNextPath", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSiteNextPath", UpdateType.Script); return; }
     if (s.StartsWith("ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSiteCancel", UpdateType.Script); return; }
     if (s.Equals("PathfinderMaxSpeedRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderMaxSpeedRequest", UpdateType.Script); return; }
+    if (s.Equals("LiveDockDataRequest", StringComparison.OrdinalIgnoreCase)) { Main("LiveDockDataRequest", UpdateType.Script); return; }
     if (s.Equals("PathfinderReturnRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderReturnRequest", UpdateType.Script); return; }
     if (s.Equals("AsteroidSetUpComplete", StringComparison.OrdinalIgnoreCase)) { Main("AsteroidSetUpComplete", UpdateType.Script); return; }
     if (s.Equals("Reset", StringComparison.OrdinalIgnoreCase)) { Main("Reset", UpdateType.Script); return; }
@@ -843,6 +857,20 @@ void BroadcastPathfinder(string message)
 {
     IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, message);
     IGC.SendBroadcastMessage(PATHFINDER_CHANNEL_LEGACY, message);
+}
+
+void SendLiveDockData()
+{
+    if (remote == null) return;
+    Vector3D offset = GetGlobalOffset();
+    Vector3D entryPos = remote.GetPosition() + offset;
+    double yaw, pitch, roll;
+    GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll);
+    string entryGps = $"GPS:Entry:{entryPos.X:F2}:{entryPos.Y:F2}:{entryPos.Z:F2}:";
+    string entryOrient = $"{yaw:F2},{pitch:F2},{roll:F2}";
+    Vector3D dockPos = carrierConnector != null ? carrierConnector.GetPosition() : remote.GetPosition();
+    string connectorGps = $"GPS:Connector:{dockPos.X:F2}:{dockPos.Y:F2}:{dockPos.Z:F2}:";
+    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}");
 }
 
 void ResetCarrierState()
