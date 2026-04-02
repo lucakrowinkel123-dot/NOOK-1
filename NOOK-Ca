@@ -870,7 +870,11 @@ void SendLiveDockData()
     string entryOrient = $"{yaw:F2},{pitch:F2},{roll:F2}";
     Vector3D dockPos = carrierConnector != null ? carrierConnector.GetPosition() : remote.GetPosition();
     string connectorGps = $"GPS:Connector:{dockPos.X:F2}:{dockPos.Y:F2}:{dockPos.Z:F2}:";
-    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}");
+    Vector3D f = remote.WorldMatrix.Forward;
+    Vector3D u = remote.WorldMatrix.Up;
+    string fwdVec = $"{f.X:F4},{f.Y:F4},{f.Z:F4}";
+    string upVec = $"{u.X:F4},{u.Y:F4},{u.Z:F4}";
+    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}|{fwdVec}|{upVec}");
 }
 
 void ResetCarrierState()

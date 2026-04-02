@@ -677,7 +677,13 @@ void HandleLiveDockData(string msg)
     Vector3D p;
     if (TryParseGPS(parts[1], out p)) { entry1Target = p; hasEntry1Target = true; }
     Vector3D f, u;
-    if (TryParseOrientation(parts[2], out f, out u)) { entry1Forward = f; entry1Up = u; }
+    if (parts.Length >= 6 && TryParseVector3(parts[4], out f) && TryParseVector3(parts[5], out u)) {
+        entry1Forward = Vector3D.Normalize(f);
+        entry1Up = Vector3D.Normalize(u);
+    } else if (TryParseOrientation(parts[2], out f, out u)) {
+        entry1Forward = f;
+        entry1Up = u;
+    }
     if (TryParseGPS(parts[3], out p)) { liveConnectorTarget = p; hasLiveConnectorTarget = true; }
     if (pendingDockStart) StartDock();
 }
@@ -689,6 +695,13 @@ bool TryParseGPS(string gps, out Vector3D pos) {
     pos = Vector3D.Zero; var p = gps.Split(':'); if (p.Length < 5) return false; 
     return double.TryParse(p[2], out pos.X) && double.TryParse(p[3], out pos.Y) && double.TryParse(p[4], out pos.Z); 
 } 
+
+bool TryParseVector3(string raw, out Vector3D v) {
+    v = Vector3D.Zero;
+    var p = raw.Split(',');
+    if (p.Length < 3) return false;
+    return double.TryParse(p[0], out v.X) && double.TryParse(p[1], out v.Y) && double.TryParse(p[2], out v.Z);
+}
 
 void GetRotationAngles(Vector3D forward, Vector3D up, out double yaw, out double pitch, out double roll) { 
     Vector3D left = Vector3D.Cross(up, forward); forward.Normalize(); up.Normalize(); left.Normalize(); 
