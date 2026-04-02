@@ -551,7 +551,9 @@ void ApplyDockStraight(double dt)
 
     Vector3D stageDir = hasLiveConnectorOrientation ? liveConnectorForward : entry1Forward;
     Vector3D stagePoint = liveConnectorTarget + (Vector3D.Normalize(stageDir) * connectorApproachDistance);
-    Vector3D toStage = stagePoint - remote.GetPosition();
+    Vector3D connectorOffset = connector != null ? (connector.GetPosition() - remote.GetPosition()) : Vector3D.Zero;
+    Vector3D targetRemotePos = stagePoint - connectorOffset;
+    Vector3D toStage = targetRemotePos - remote.GetPosition();
     double progress = toStage.Length();
     gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
     if (progress <= 2.0) {
