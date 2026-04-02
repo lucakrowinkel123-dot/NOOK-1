@@ -544,7 +544,9 @@ void ApplyDock(double dt)
         return;
     }
 
-    Vector3D delta = liveConnectorTarget - remote.GetPosition();
+    Vector3D connectorOffset = connector != null ? (connector.GetPosition() - remote.GetPosition()) : Vector3D.Zero;
+    Vector3D targetRemotePos = liveConnectorTarget - connectorOffset;
+    Vector3D delta = targetRemotePos - remote.GetPosition();
     double distance = delta.Length();
 
     // Keep refreshing Ca orientation/connector while in final stretch.
@@ -556,14 +558,7 @@ void ApplyDock(double dt)
         }
     }
 
-    if (connector != null && hasLiveConnectorOrientation) {
-        MatrixD cDesired = MatrixD.CreateWorld(Vector3D.Zero, -liveConnectorForward, liveConnectorUp);
-        MatrixD localConnector = MatrixD.Multiply(connector.WorldMatrix, MatrixD.Transpose(remote.WorldMatrix));
-        MatrixD rDesired = MatrixD.Multiply(cDesired, MatrixD.Transpose(localConnector));
-        gyroControl?.FaceVectors(rDesired.Forward, rDesired.Up, dt);
-    } else {
-        gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
-    }
+    gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
 
     if (distance <= 1.5) {
         dockActive = false;
