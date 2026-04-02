@@ -1,16 +1,25 @@
-// === ANOUK-Ca (Carrier) Mothership Script ===
+// === EMM-A (Exploration, Mapping & Mining Assistant) Coordinator Script ===
 // Data LCDs: 25 lines per LCD, r195g255b255 font, 0.695 size, 1.0 padding
 
-const string LCD_TAG = "ANOUK-Ca LCD Data";
-const string FIELD_DB_NAME = "ANOUK-Ca A-Field DB";
+const string LCD_TAG = "EMM-A Ca LCD Data";
+const string FIELD_DB_NAME = "EMM-A Ca A-Field DB";
+const string FIELD_DB_NAME_LEGACY = "ANOUK-Ca A-Field DB";
 const int MAX_ASTEROIDS_PER_BLOCK = 5;
-const string PATHFINDER_CHANNEL = "ANOUK-Ca_PathFinder_Channel";
+const string PATHFINDER_CHANNEL = "EMM-A Ca_PathFinder_Channel";
+const string PATHFINDER_CHANNEL_LEGACY = "ANOUK-Ca_PathFinder_Channel";
+const string REMOTE_NAME = "EMM-A Ca Remote Control";
+const string REMOTE_NAME_LEGACY = "ANOUK-Ca Remote Control";
+const string CONNECTOR_NAME = "EMM-A Ca Connector";
+const string CONNECTOR_NAME_LEGACY = "ANOUK-Ca Connector";
+const string ASTEROID_DB_PREFIX = "EMM-A Ca ";
+const string ASTEROID_DB_PREFIX_LEGACY = "ANOUK-Ca ";
 
 // Lists for asteroid databases and LCDs
 List<IMyTimerBlock> asteroidDatabases = new List<IMyTimerBlock>();
 List<IMyTextPanel> outputLCDs = new List<IMyTextPanel>();
 IMyRemoteControl remote;
 IMyTimerBlock fieldDatabase;
+IMyShipConnector carrierConnector;
 
 // Internal state variables for site setup
 int currentSiteN = 1;
@@ -22,30 +31,42 @@ public Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
     IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL);
+    IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL_LEGACY);
 }
 
 public void Main(string argument, UpdateType updateSource)
 {
     // --- BLOCK LOOKUPS ---
-    // Find remote control, asteroid databases, and field DB for this zone
+    // Find remote control and field DB first
     List<IMyRemoteControl> remotes = new List<IMyRemoteControl>();
-    GridTerminalSystem.GetBlocksOfType(remotes, r => r.CustomName.Contains("ANOUK-Ca Remote Control"));
+    GridTerminalSystem.GetBlocksOfType(remotes, r => r.CustomName.Contains(REMOTE_NAME) || r.CustomName.Contains(REMOTE_NAME_LEGACY));
     remote = remotes.Count > 0 ? remotes[0] : null;
-    string currentZone = remote != null ? GetAsteroidZone(remote.GetPosition()) : "Unknown";
+    List<IMyTimerBlock> fieldBlocks = new List<IMyTimerBlock>();
+    GridTerminalSystem.GetBlocksOfType(fieldBlocks, b =>
+        b.CustomName.IndexOf(FIELD_DB_NAME, StringComparison.OrdinalIgnoreCase) >= 0 ||
+        b.CustomName.IndexOf(FIELD_DB_NAME_LEGACY, StringComparison.OrdinalIgnoreCase) >= 0);
+    fieldDatabase = fieldBlocks.Count > 0 ? fieldBlocks[0] : null;
+    List<IMyShipConnector> connectors = new List<IMyShipConnector>();
+    GridTerminalSystem.GetBlocksOfType(connectors, c =>
+        c.CustomName.IndexOf(CONNECTOR_NAME, StringComparison.OrdinalIgnoreCase) >= 0 ||
+        c.CustomName.IndexOf(CONNECTOR_NAME_LEGACY, StringComparison.OrdinalIgnoreCase) >= 0);
+    carrierConnector = connectors.Count > 0 ? connectors[0] : null;
+
+    // --- SAFETY CHECKS ---
+    if (remote == null) { Echo("EMM-A Ca/ANOUK-Ca Remote Control not found"); return; }
+    if (fieldDatabase == null) { Echo("Field database block not found."); return; }
+
+    // Now resolve zone and load asteroid DB blocks for this zone
+    string currentZone = GetAsteroidZone(remote.GetPosition());
     asteroidDatabases.Clear();
     GridTerminalSystem.GetBlocksOfType(asteroidDatabases, b =>
-        b.CustomName.StartsWith("ANOUK-Ca " + currentZone + " A-DB HD"));
+        b.CustomName.StartsWith(ASTEROID_DB_PREFIX + currentZone + " A-DB HD") ||
+        b.CustomName.StartsWith(ASTEROID_DB_PREFIX_LEGACY + currentZone + " A-DB HD"));
+    if (asteroidDatabases.Count == 0) { Echo("No asteroid database blocks found for zone: " + currentZone); return; }
+
     outputLCDs.Clear();
     GridTerminalSystem.GetBlocksOfType(outputLCDs, l => l.CustomName.StartsWith(LCD_TAG));
     outputLCDs.Sort((a, b) => a.CustomName.CompareTo(b.CustomName));
-    List<IMyTimerBlock> fieldBlocks = new List<IMyTimerBlock>();
-    GridTerminalSystem.GetBlocksOfType(fieldBlocks, b => b.CustomName.IndexOf(FIELD_DB_NAME, StringComparison.OrdinalIgnoreCase) >= 0);
-    fieldDatabase = fieldBlocks.Count > 0 ? fieldBlocks[0] : null;
-
-    // --- SAFETY CHECKS ---
-    if (remote == null) { Echo("ANOUK-Ca Remote Control not found"); return; }
-    if (fieldDatabase == null) { Echo("Field database block not found."); return; }
-    if (asteroidDatabases.Count == 0) { Echo("No asteroid database blocks found for zone: " + currentZone); return; }
 
     if (argument == null) argument = "";
     argument = argument.Trim();
@@ -57,7 +78,7 @@ public void Main(string argument, UpdateType updateSource)
         // Confirm back to pathfinder that a step is complete
         if (!string.IsNullOrWhiteSpace(lastConfirmedField) && !string.IsNullOrWhiteSpace(lastConfirmedGps) && !string.IsNullOrWhiteSpace(lastConfirmedOrient))
         {
-            IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, $"Confirmed_Entry|{lastConfirmedField}|{lastConfirmedGps}|{lastConfirmedOrient}");
+            BroadcastPathfinder($"Confirmed_Entry|{lastConfirmedField}|{lastConfirmedGps}|{lastConfirmedOrient}");
             Echo($"Sent: Confirmed_Entry|{lastConfirmedField}|{lastConfirmedGps}|{lastConfirmedOrient}");
         }
         return;
@@ -67,6 +88,16 @@ public void Main(string argument, UpdateType updateSource)
     {
         // Send max speed setting to pathfinder
         SendPathfinderMaxSpeed();
+        return;
+    }
+    if (argument.Equals("LiveDockDataRequest", StringComparison.OrdinalIgnoreCase))
+    {
+        SendLiveDockData();
+        return;
+    }
+    if (argument.Equals("Reset", StringComparison.OrdinalIgnoreCase))
+    {
+        ResetCarrierState();
         return;
     }
 
@@ -83,20 +114,24 @@ public void Main(string argument, UpdateType updateSource)
             Echo("Another asteroid is already in setup."); return;
         }
         BeginAsteroidSetup();
-        RunAutoExcavationSiteEntry();
+        RunAutoExcavationSiteEntry(); // only used for first site
         return;
     }
     else if (argument.Equals("ExcavationSiteNextPath", StringComparison.OrdinalIgnoreCase))
     {
-        // Advance to next site slot, auto-enter
+        // Advance to next site slot
         currentSiteN++; 
-        RunAutoExcavationSiteEntry();
         return;
     }
     else if (argument.Equals("ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase))
     {
         // Cancel last excavation site (removes last site entry/paths/stagger)
         CancelLastExcavationSiteEntry();
+        return;
+    }
+    else if (argument.Equals("ExcavationSitePathUndo", StringComparison.OrdinalIgnoreCase))
+    {
+        UndoLastExcavationSitePath();
         return;
     }
     else if (argument.Equals("AsteroidSetUpComplete", StringComparison.OrdinalIgnoreCase))
@@ -167,7 +202,7 @@ public void Main(string argument, UpdateType updateSource)
         {
             MyIGCMessage msg = listener.AcceptMessage();
             string s = null;
-            if (listener.Tag == PATHFINDER_CHANNEL && msg.Data is string)
+            if ((listener.Tag == PATHFINDER_CHANNEL || listener.Tag == PATHFINDER_CHANNEL_LEGACY) && msg.Data is string)
             {
                 s = (string)msg.Data;
                 ProcessPathfinderMessage(s);
@@ -512,11 +547,9 @@ void SaveExcavationSitePath(string arg)
     string orient = parts[2];
 
     MyIni ini; string section; if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
-    if (n == 0) { Echo("No site entry found!"); return; }
+    int n = currentSiteN;
+    if (n == 1 && !ini.ContainsKey(section, "ExcavationSiteEntry1")) { Echo("Set entry first for site 1."); return; }
 
-    string entryField = $"ExcavationSiteEntry{n}";
-    if (!ini.ContainsKey(section, entryField)) { Echo("Set entry first."); return; }
     string nextPathField = null;
     int pathIdx = 1;
     for (; ; pathIdx++)
@@ -543,7 +576,7 @@ void SaveExcavationSiteStagger(string arg)
     string orient = parts[2];
 
     MyIni ini; string section; if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
+    int n = currentSiteN;
     string path1 = $"ExcavationSitePath{n}_1";
     if (!ini.ContainsKey(section, path1)) { Echo("Add at least one path point before stagger."); return; }
     string field = $"ExcavationSiteStagger{n}";
@@ -568,7 +601,7 @@ void SaveExcavationSite(string arg)
     string cornerB = parts[3];
 
     MyIni ini; string section; if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
+    int n = currentSiteN;
     string stagger = $"ExcavationSiteStagger{n}";
     if (!ini.ContainsKey(section, stagger)) { Echo("Set stagger before final site."); return; }
     string field = $"ExcavationSite{n}";
@@ -588,28 +621,8 @@ lastConfirmedOrient = orientation;
 Main("SendConfirm", UpdateType.Script);
 
 // --- ADVANCE TO NEXT SITE CONTEXT ---
-int newN = n + 1;
-
-string previousEntryField = $"ExcavationSiteEntry{n}";
-string nextEntryField = $"ExcavationSiteEntry{newN}";
-
-// Copy previous entry into new entry slot
-if (ini.ContainsKey(section, previousEntryField))
-{
-    string previousEntryValue = ini.Get(section, previousEntryField).ToString();
-
-    if (!ini.ContainsKey(section, nextEntryField))
-    {
-        ini.Set(section, nextEntryField, previousEntryValue);
-    }
-}
-
-// Save updated INI
-SetCurrentAsteroidIni(ini, section);
-
-currentSiteN = newN;
-
-Echo($"Site {n} complete. {nextEntryField} copied from {previousEntryField}.");
+currentSiteN = n + 1;
+Echo($"Site {n} complete. Ready for site {currentSiteN}.");
 }
 
 // --- ASTEROID INI ACCESS HELPERS ---
@@ -659,17 +672,14 @@ void CancelLastExcavationSiteEntry()
 {
     MyIni ini; string section;
     if (!GetCurrentAsteroidIni(out ini, out section)) return;
-    int n = GetLatestSiteN(ini, section);
-    if (n == 0)
+    int n = Math.Max(1, currentSiteN - 1);
+    if (!ini.ContainsKey(section, $"ExcavationSite{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSiteStagger{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSitePath{n}_1"))
     {
         Echo("No previous entry to cancel.");
         return;
     }
-
-    // Delete ExcavationSiteEntryN
-    string entryKey = $"ExcavationSiteEntry{n}";
-    if (ini.ContainsKey(section, entryKey))
-        ini.Delete(section, entryKey);
 
     // Delete all ExcavationSitePathN_*
     int pathIdx = 1;
@@ -689,10 +699,14 @@ void CancelLastExcavationSiteEntry()
     if (ini.ContainsKey(section, siteKey))
         ini.Delete(section, siteKey);
 
+    // First site may include an entry key
+    if (n == 1 && ini.ContainsKey(section, "ExcavationSiteEntry1"))
+        ini.Delete(section, "ExcavationSiteEntry1");
+
     SetCurrentAsteroidIni(ini, section);
 
-    currentSiteN = n; // Step back to previous
-    Echo($"Excavation site entry {n} canceled (entry, path, stagger, site removed).");
+    currentSiteN = n; // Step back to canceled site index
+    Echo($"Excavation site {n} canceled (path, stagger, site removed).");
 }
 
 // --- IGC HANDLER ---
@@ -708,13 +722,35 @@ void ProcessPathfinderMessage(string s)
     }
     if (s.StartsWith("ExcavationSiteEntry")) { SaveExcavationSiteEntry(s); return; }
     if (s.StartsWith("ExcavationSitePathAdd")) { SaveExcavationSitePath(s); return; }
+    if (s.StartsWith("ExcavationSitePathUndo", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSitePathUndo", UpdateType.Script); return; }
     if (s.StartsWith("ExcavationSiteStagger")) { SaveExcavationSiteStagger(s); return; }
     if (s.StartsWith("ExcavationSiteSetUpComplete")) { SaveExcavationSite(s); return; }
     if (s.StartsWith("ExcavationSiteNextPath", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSiteNextPath", UpdateType.Script); return; }
     if (s.StartsWith("ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSiteCancel", UpdateType.Script); return; }
     if (s.Equals("PathfinderMaxSpeedRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderMaxSpeedRequest", UpdateType.Script); return; }
+    if (s.Equals("LiveDockDataRequest", StringComparison.OrdinalIgnoreCase)) { Main("LiveDockDataRequest", UpdateType.Script); return; }
     if (s.Equals("PathfinderReturnRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderReturnRequest", UpdateType.Script); return; }
     if (s.Equals("AsteroidSetUpComplete", StringComparison.OrdinalIgnoreCase)) { Main("AsteroidSetUpComplete", UpdateType.Script); return; }
+    if (s.Equals("Reset", StringComparison.OrdinalIgnoreCase)) { Main("Reset", UpdateType.Script); return; }
+}
+
+void UndoLastExcavationSitePath()
+{
+    MyIni ini; string section;
+    if (!GetCurrentAsteroidIni(out ini, out section)) return;
+    int n = currentSiteN;
+    int lastIdx = 0;
+    for (int i = 1; ; i++)
+    {
+        string key = $"ExcavationSitePath{n}_{i}";
+        if (ini.ContainsKey(section, key)) lastIdx = i;
+        else break;
+    }
+    if (lastIdx == 0) { Echo($"No path points to undo for site {n}."); return; }
+    string lastKey = $"ExcavationSitePath{n}_{lastIdx}";
+    ini.Delete(section, lastKey);
+    SetCurrentAsteroidIni(ini, section);
+    Echo($"Removed {lastKey}.");
 }
 
 // --- PATHFINDER RETURN PATH (NOW Path|... ) ---
@@ -723,8 +759,14 @@ void SendReturnPath()
 {
     MyIni ini; string section;
     if (!GetCurrentAsteroidIni(out ini, out section)) { Echo("No asteroid setup."); return; }
-    int n = GetLatestSiteN(ini, section);
-    if (n == 0) { Echo("No site entry."); return; }
+    int n = Math.Max(1, currentSiteN - 1);
+    if (!ini.ContainsKey(section, $"ExcavationSite{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSiteStagger{n}") &&
+        !ini.ContainsKey(section, $"ExcavationSitePath{n}_1"))
+    {
+        Echo("No site data.");
+        return;
+    }
 
     // Read close distances from field DB Settings
     MyIni fieldIni = new MyIni();
@@ -734,8 +776,8 @@ void SendReturnPath()
     double staggerClose = fieldIni.Get("Settings", "StaggerCloseDistance").ToDouble(0.5);
     double siteClose = fieldIni.Get("Settings", "SiteCloseDistance").ToDouble(0.5);
 
-    // Gather: Entry, Stagger, Paths (orientations included)
-    string entry = ini.Get(section, $"ExcavationSiteEntry{n}").ToString();
+    // Gather: (optional first-site Entry), Stagger, Paths, Site (orientations included)
+    string entry = (n == 1 && ini.ContainsKey(section, "ExcavationSiteEntry1")) ? ini.Get(section, "ExcavationSiteEntry1").ToString() : "";
     string stagger = ini.ContainsKey(section, $"ExcavationSiteStagger{n}") ? ini.Get(section, $"ExcavationSiteStagger{n}").ToString() : "";
     string site = ini.ContainsKey(section, $"ExcavationSite{n}") ? ini.Get(section, $"ExcavationSite{n}").ToString() : "";
     List<string> pathList = new List<string>();
@@ -783,7 +825,7 @@ void SendReturnPath()
     }
 
     string route = string.Join("|", all);
-    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, "Path|" + route);
+    BroadcastPathfinder("Path|" + route);
     Echo("Sent: Path|" + route);
 }
 
@@ -796,7 +838,7 @@ void SendPathfinderMaxSpeed()
     if (!ini.TryParse(fieldDatabase.CustomData)) { Echo("Bad field DB ini."); return; }
     string maxSpeed = ini.Get("Settings", "PathfinderMaxSpeed").ToString();
     if (string.IsNullOrWhiteSpace(maxSpeed)) maxSpeed = "30";
-    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, $"PathfinderMaxSpeed|{maxSpeed}");
+    BroadcastPathfinder($"PathfinderMaxSpeed|{maxSpeed}");
     Echo($"Sent: PathfinderMaxSpeed|{maxSpeed}");
 }
 
@@ -809,4 +851,33 @@ void GetRotationAngles(Vector3D forward, Vector3D up, out double yaw, out double
     yaw = Math.Atan2(forward.X, forward.Z) * (180 / Math.PI);
     pitch = Math.Asin(forward.Y) * (180 / Math.PI);
     roll = Math.Atan2(left.Y, up.Y) * (180 / Math.PI);
+}
+
+void BroadcastPathfinder(string message)
+{
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, message);
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL_LEGACY, message);
+}
+
+void SendLiveDockData()
+{
+    if (remote == null) return;
+    Vector3D offset = GetGlobalOffset();
+    Vector3D entryPos = remote.GetPosition() + offset;
+    double yaw, pitch, roll;
+    GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll);
+    string entryGps = $"GPS:Entry:{entryPos.X:F2}:{entryPos.Y:F2}:{entryPos.Z:F2}:";
+    string entryOrient = $"{yaw:F2},{pitch:F2},{roll:F2}";
+    Vector3D dockPos = carrierConnector != null ? carrierConnector.GetPosition() : remote.GetPosition();
+    string connectorGps = $"GPS:Connector:{dockPos.X:F2}:{dockPos.Y:F2}:{dockPos.Z:F2}:";
+    BroadcastPathfinder($"LiveDockData|{entryGps}|{entryOrient}|{connectorGps}");
+}
+
+void ResetCarrierState()
+{
+    currentSiteN = 1;
+    lastConfirmedField = "";
+    lastConfirmedGps = "";
+    lastConfirmedOrient = "";
+    Echo("Carrier reset complete (runtime state).");
 }
