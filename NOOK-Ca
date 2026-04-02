@@ -116,6 +116,11 @@ public void Main(string argument, UpdateType updateSource)
         CancelLastExcavationSiteEntry();
         return;
     }
+    else if (argument.Equals("ExcavationSitePathUndo", StringComparison.OrdinalIgnoreCase))
+    {
+        UndoLastExcavationSitePath();
+        return;
+    }
     else if (argument.Equals("AsteroidSetUpComplete", StringComparison.OrdinalIgnoreCase))
     {
         // Complete asteroid setup (sets status to pending)
@@ -704,6 +709,7 @@ void ProcessPathfinderMessage(string s)
     }
     if (s.StartsWith("ExcavationSiteEntry")) { SaveExcavationSiteEntry(s); return; }
     if (s.StartsWith("ExcavationSitePathAdd")) { SaveExcavationSitePath(s); return; }
+    if (s.StartsWith("ExcavationSitePathUndo", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSitePathUndo", UpdateType.Script); return; }
     if (s.StartsWith("ExcavationSiteStagger")) { SaveExcavationSiteStagger(s); return; }
     if (s.StartsWith("ExcavationSiteSetUpComplete")) { SaveExcavationSite(s); return; }
     if (s.StartsWith("ExcavationSiteNextPath", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSiteNextPath", UpdateType.Script); return; }
@@ -712,6 +718,25 @@ void ProcessPathfinderMessage(string s)
     if (s.Equals("PathfinderReturnRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderReturnRequest", UpdateType.Script); return; }
     if (s.Equals("AsteroidSetUpComplete", StringComparison.OrdinalIgnoreCase)) { Main("AsteroidSetUpComplete", UpdateType.Script); return; }
     if (s.Equals("Reset", StringComparison.OrdinalIgnoreCase)) { Main("Reset", UpdateType.Script); return; }
+}
+
+void UndoLastExcavationSitePath()
+{
+    MyIni ini; string section;
+    if (!GetCurrentAsteroidIni(out ini, out section)) return;
+    int n = currentSiteN;
+    int lastIdx = 0;
+    for (int i = 1; ; i++)
+    {
+        string key = $"ExcavationSitePath{n}_{i}";
+        if (ini.ContainsKey(section, key)) lastIdx = i;
+        else break;
+    }
+    if (lastIdx == 0) { Echo($"No path points to undo for site {n}."); return; }
+    string lastKey = $"ExcavationSitePath{n}_{lastIdx}";
+    ini.Delete(section, lastKey);
+    SetCurrentAsteroidIni(ini, section);
+    Echo($"Removed {lastKey}.");
 }
 
 // --- PATHFINDER RETURN PATH (NOW Path|... ) ---

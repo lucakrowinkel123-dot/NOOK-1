@@ -28,6 +28,16 @@ List<string> pathGPSStrings = new List<string>();
 List<string> pathOrientations = new List<string>(); 
 List<double> pathCloseEnoughs = new List<double>(); 
 double pathMaxSpeed = -1; 
+List<Vector3D> currentSitePathPoints = new List<Vector3D>();
+List<Vector3D> currentSitePathForwards = new List<Vector3D>();
+List<Vector3D> currentSitePathUps = new List<Vector3D>();
+Vector3D entry1Forward = Vector3D.Forward;
+Vector3D entry1Up = Vector3D.Up;
+bool undoReturnActive = false;
+int undoReturnTargetIndex = 0;
+List<Vector3D> undoReturnTargets = new List<Vector3D>();
+List<Vector3D> undoReturnForwards = new List<Vector3D>();
+List<Vector3D> undoReturnUps = new List<Vector3D>();
 
 // ---- RECORDING MODE STATE ---- 
 bool recordingActive = false; bool recordingPaused = false; 
@@ -117,10 +127,23 @@ public void Main(string argument, UpdateType updateSource) {
         commandPrefix = "ExcavationSiteCancel"; isSendCommand = true; 
         if (recordingActive) StopRecordingMode();
         autoReturnToStaggerActive = false;
+        undoReturnActive = false;
+        undoReturnTargets.Clear(); undoReturnForwards.Clear(); undoReturnUps.Clear(); undoReturnTargetIndex = 0;
+        currentSitePathPoints.Clear(); currentSitePathForwards.Clear(); currentSitePathUps.Clear();
         isSoftLocked = false; setupStep = 0; 
         ConfigureSensorVisuals(false); // Clean up visuals
         StopOverrides();
     } 
+    else if (cmd.Equals("PF_ExcavationSitePathUndo", StringComparison.OrdinalIgnoreCase)) {
+        commandPrefix = "ExcavationSitePathUndo"; isSendCommand = true;
+        if (recordingActive) StopRecordingMode();
+    }
+    else if (cmd.Equals("PF_ExcavationSitePathUndoAndReturn", StringComparison.OrdinalIgnoreCase)) {
+        commandPrefix = "ExcavationSitePathUndo"; isSendCommand = true;
+        if (recordingActive) StopRecordingMode();
+        BeginUndoAndReturn();
+    }
+    else if (cmd.Equals("PF_AsteroidSetUpCancel", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "AsteroidSetUpCancel"; isSendCommand = true; }
     else if (CmdIs(cmd, "EMMA_ReturnRequest", "PF_ReturnRequest")) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
     else if (CmdIs(cmd, "EMMA_MaxSpeedRequest", "PF_MaxSpeedRequest")) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
     else if (CmdIs(cmd, "EMMA_AsteroidSetUpComplete", "PF_AsteroidSetUpComplete")) { commandPrefix = "AsteroidSetUpComplete"; isSendCommand = true; }
@@ -136,7 +159,14 @@ public void Main(string argument, UpdateType updateSource) {
             var pos = remote.GetPosition(); 
             if (commandPrefix == "ExcavationSiteStagger") { 
                 lastStaggerPos = pos; 
+                autoReturnHoldForward = remote.WorldMatrix.Forward;
+                autoReturnHoldUp = remote.WorldMatrix.Up;
                 hasLastStaggerPoint = true; 
+            }
+            if (commandPrefix == "ExcavationSitePathAdd") {
+                currentSitePathPoints.Add(pos);
+                currentSitePathForwards.Add(remote.WorldMatrix.Forward);
+                currentSitePathUps.Add(remote.WorldMatrix.Up);
             }
             string gps = $"GPS:Site:{pos.X:F2}:{pos.Y:F2}:{pos.Z:F2}:"; 
             double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
@@ -166,6 +196,7 @@ public void Main(string argument, UpdateType updateSource) {
     // --- SOFT LOCK & RECORDING LOGIC --- 
     if (isSoftLocked && remote != null) ApplySoftLock(deltaTime);
     if (autoReturnToStaggerActive && remote != null) ApplyAutoReturnToStagger(deltaTime);
+    if (undoReturnActive && remote != null) ApplyUndoAndReturn(deltaTime);
 
     if (recordingActive && !recordingPaused && remote != null) { 
         recordingTimer += deltaTime; 
@@ -241,6 +272,9 @@ void ApplyAutoReturnToStagger(double dt) {
     if (distance <= AUTO_RETURN_CLOSE) {
         autoReturnToStaggerActive = false;
         StopOverrides(); // release control back to pilot
+        currentSitePathPoints.Clear();
+        currentSitePathForwards.Clear();
+        currentSitePathUps.Clear();
         if (!recordingActive) StartRecordingMode();
         Echo("[AutoReturn] Reached stagger point. Pilot control restored. Recording started.");
         return;
@@ -313,6 +347,8 @@ void HandleConfirmedEntry(string msg) {
     if (parts[1].Equals("ExcavationSiteEntry1", StringComparison.OrdinalIgnoreCase)) {
         Vector3D p;
         if (TryParseGPS(parts[2], out p)) { entry1Target = p; hasEntry1Target = true; }
+        Vector3D f, u;
+        if (TryParseOrientation(parts[3], out f, out u)) { entry1Forward = f; entry1Up = u; }
     }
     if (recordingActive) { Vector3D p; if (TryParseGPS(parts[2], out p)) { recordingLastGPS = p; recordingTimer = 0; recordingPaused = false; } } 
 } 
@@ -328,6 +364,101 @@ void UpdateEntry1ProximityIndicator() {
     int g = (int)MathHelper.Clamp(255 * t, 0, 255);
     indicatorLight.Color = new Color(r, g, 0);
     indicatorLight.Enabled = true;
+}
+
+void BeginUndoAndReturn() {
+    // Remove local last path point to mirror undo intent.
+    if (currentSitePathPoints.Count > 0) {
+        int last = currentSitePathPoints.Count - 1;
+        currentSitePathPoints.RemoveAt(last);
+        currentSitePathForwards.RemoveAt(last);
+        currentSitePathUps.RemoveAt(last);
+    }
+
+    undoReturnTargets.Clear();
+    undoReturnForwards.Clear();
+    undoReturnUps.Clear();
+    undoReturnTargetIndex = 0;
+
+    for (int i = currentSitePathPoints.Count - 1; i >= 0; i--) {
+        undoReturnTargets.Add(currentSitePathPoints[i]);
+        undoReturnForwards.Add(currentSitePathForwards[i]);
+        undoReturnUps.Add(currentSitePathUps[i]);
+    }
+
+    if (hasLastStaggerPoint) {
+        undoReturnTargets.Add(lastStaggerPos);
+        undoReturnForwards.Add(autoReturnHoldForward);
+        undoReturnUps.Add(autoReturnHoldUp);
+    } else if (hasEntry1Target) {
+        undoReturnTargets.Add(entry1Target);
+        undoReturnForwards.Add(entry1Forward);
+        undoReturnUps.Add(entry1Up);
+    }
+
+    if (undoReturnTargets.Count == 0) { Echo("[UndoReturn] No checkpoint to return to."); return; }
+    undoReturnActive = true;
+    Echo($"[UndoReturn] Reversing through {undoReturnTargets.Count} checkpoint(s).");
+}
+
+void ApplyUndoAndReturn(double dt) {
+    if (undoReturnTargetIndex >= undoReturnTargets.Count) {
+        undoReturnActive = false;
+        StopOverrides();
+        Echo("[UndoReturn] Completed.");
+        return;
+    }
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        undoReturnActive = false;
+        StopOverrides();
+        Echo("[UndoReturn] Canceled by pilot input.");
+        return;
+    }
+
+    Vector3D targetPos = undoReturnTargets[undoReturnTargetIndex];
+    Vector3D targetF = undoReturnForwards[undoReturnTargetIndex];
+    Vector3D targetU = undoReturnUps[undoReturnTargetIndex];
+    Vector3D delta = targetPos - remote.GetPosition();
+    double distance = delta.Length();
+    gyroControl?.FaceVectors(targetF, targetU, dt);
+
+    if (distance <= AUTO_RETURN_CLOSE) {
+        undoReturnTargetIndex++;
+        StopThrusterOverrides();
+        return;
+    }
+
+    Vector3D desiredVel = Vector3D.Zero;
+    if (distance > 0.01)
+        desiredVel = Vector3D.Normalize(delta) * MathHelper.Clamp(distance / 4.0, 0.4, AUTO_RETURN_MAX_SPEED);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+
+    List<IMyThrust> thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
+}
+
+bool TryParseOrientation(string orientation, out Vector3D forward, out Vector3D up) {
+    forward = Vector3D.Forward;
+    up = Vector3D.Up;
+    var p = orientation.Split(',');
+    if (p.Length < 3) return false;
+    double yawDeg, pitchDeg, rollDeg;
+    if (!double.TryParse(p[0], out yawDeg)) return false;
+    if (!double.TryParse(p[1], out pitchDeg)) return false;
+    if (!double.TryParse(p[2], out rollDeg)) return false;
+    MatrixD m = MatrixD.CreateFromYawPitchRoll(
+        MathHelper.ToRadians((float)yawDeg),
+        MathHelper.ToRadians((float)pitchDeg),
+        MathHelper.ToRadians((float)rollDeg)
+    );
+    forward = Vector3D.Normalize(m.Forward);
+    up = Vector3D.Normalize(m.Up);
+    return true;
 }
 
 void StopOverrides() { StopThrusterOverrides(); gyroControl?.Reset(); }
@@ -366,13 +497,23 @@ void ResetPathfinder(bool sendCarrierReset) {
     pathGPSStrings.Clear();
     pathOrientations.Clear();
     pathCloseEnoughs.Clear();
+    currentSitePathPoints.Clear();
+    currentSitePathForwards.Clear();
+    currentSitePathUps.Clear();
     pathMaxSpeed = -1;
 
     blinkRequested = false;
     blinkTicks = 0;
     hasEntry1Target = false;
     entry1Target = Vector3D.Zero;
+    entry1Forward = Vector3D.Forward;
+    entry1Up = Vector3D.Up;
     entry1ProximityEnabled = false;
+    undoReturnActive = false;
+    undoReturnTargetIndex = 0;
+    undoReturnTargets.Clear();
+    undoReturnForwards.Clear();
+    undoReturnUps.Clear();
 
     ConfigureSensorVisuals(false);
     if (indicatorLight != null) indicatorLight.Enabled = false;
