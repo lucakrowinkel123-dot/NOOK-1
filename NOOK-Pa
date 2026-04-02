@@ -457,7 +457,8 @@ void ApplyUndockToEntry(double dt) {
 
     Vector3D delta = entry1Target - remote.GetPosition();
     double distance = delta.Length();
-    gyroControl?.FaceVectors(undockHoldForward, undockHoldUp, dt);
+    // Match carrier-aligned entry orientation during transit.
+    gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
 
     if (distance <= 2.0) {
         undockToEntryActive = false;
