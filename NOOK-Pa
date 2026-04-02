@@ -43,6 +43,7 @@ List<Vector3D> undoReturnUps = new List<Vector3D>();
 bool undockActive = false;
 bool undockToEntryActive = false;
 bool dockActive = false;
+bool dockStraightActive = false;
 bool pendingDockStart = false;
 Vector3D undockStartPos = Vector3D.Zero;
 Vector3D undockMoveDir = Vector3D.Backward;
@@ -56,7 +57,12 @@ bool hasLiveConnectorOrientation = false;
 double dockRefreshTimer = 0;
 double undockLiveRefreshTimer = 0;
 const double UNDOCK_DISTANCE = 25.0;
+const double DOCK_STRAIGHT_DISTANCE = 25.0;
 const double DOCK_REFRESH_DISTANCE = 40.0;
+Vector3D dockStraightStartPos = Vector3D.Zero;
+Vector3D dockStraightDir = Vector3D.Forward;
+Vector3D dockHoldForward = Vector3D.Forward;
+Vector3D dockHoldUp = Vector3D.Up;
 
 // ---- RECORDING MODE STATE ---- 
 bool recordingActive = false; bool recordingPaused = false; 
@@ -151,6 +157,7 @@ public void Main(string argument, UpdateType updateSource) {
         undockActive = false;
         undockToEntryActive = false;
         dockActive = false;
+        dockStraightActive = false;
         pendingDockStart = false;
         hasLiveConnectorOrientation = false;
         undockLiveRefreshTimer = 0;
@@ -235,6 +242,7 @@ public void Main(string argument, UpdateType updateSource) {
     if (undoReturnActive && remote != null) ApplyUndoAndReturn(deltaTime);
     if (undockActive && remote != null) ApplyUndock(deltaTime);
     if (undockToEntryActive && remote != null) ApplyUndockToEntry(deltaTime);
+    if (dockStraightActive && remote != null) ApplyDockStraight(deltaTime);
     if (dockActive && remote != null) ApplyDock(deltaTime);
 
     if (recordingActive && !recordingPaused && remote != null) { 
@@ -407,7 +415,7 @@ void UpdateEntry1ProximityIndicator() {
 
 bool UpdateAutopilotIndicator() {
     if (indicatorLight == null) return false;
-    bool ap = autoReturnToStaggerActive || undoReturnActive || undockActive || undockToEntryActive || dockActive || isSoftLocked;
+    bool ap = autoReturnToStaggerActive || undoReturnActive || undockActive || undockToEntryActive || dockStraightActive || dockActive || isSoftLocked;
     if (!ap) { indicatorLight.Enabled = false; return false; }
     indicatorLight.Color = new Color(0, 100, 255);
     indicatorLight.Enabled = true;
@@ -523,10 +531,49 @@ void StartDock()
     if (!hasEntry1Target || !hasLiveConnectorTarget) { Echo("[Dock] Waiting for live dock data."); return; }
     double dEntry = Vector3D.Distance(remote.GetPosition(), entry1Target);
     if (dEntry > ENTRY1_RED_DISTANCE) { Echo("[Dock] Move inside Entry1 50m bubble first."); return; }
-    dockActive = true;
+    dockHoldForward = remote.WorldMatrix.Forward;
+    dockHoldUp = remote.WorldMatrix.Up;
+    dockStraightStartPos = remote.GetPosition();
+    Vector3D toConn = liveConnectorTarget - dockStraightStartPos;
+    dockStraightDir = toConn.LengthSquared() > 0.0001 ? Vector3D.Normalize(toConn) : Vector3D.Normalize(remote.WorldMatrix.Forward);
+    dockStraightActive = true;
+    dockActive = false;
     pendingDockStart = false;
     dockRefreshTimer = 0;
-    Echo("[Dock] Starting dock autopilot.");
+    Echo("[Dock] Starting 25m straight-in approach.");
+}
+
+void ApplyDockStraight(double dt)
+{
+    if (remote == null) return;
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        dockStraightActive = false;
+        StopOverrides();
+        Echo("[Dock] Straight approach canceled by pilot input.");
+        return;
+    }
+
+    gyroControl?.FaceVectors(dockHoldForward, dockHoldUp, dt);
+    Vector3D traveled = remote.GetPosition() - dockStraightStartPos;
+    double progress = Vector3D.Dot(traveled, dockStraightDir);
+    if (progress >= DOCK_STRAIGHT_DISTANCE) {
+        dockStraightActive = false;
+        dockActive = true;
+        StopThrusterOverrides();
+        Echo("[Dock] Straight approach complete. Final connector approach.");
+        return;
+    }
+
+    double remaining = DOCK_STRAIGHT_DISTANCE - progress;
+    Vector3D desiredVel = dockStraightDir * MathHelper.Clamp(remaining / 4.0, 0.25, 1.6);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+    List<IMyThrust> thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
 }
 
 void ApplyDock(double dt)
@@ -761,6 +808,7 @@ void ResetPathfinder(bool sendCarrierReset) {
     undoReturnUps.Clear();
     undockActive = false;
     undockToEntryActive = false;
+    dockStraightActive = false;
     dockActive = false;
     pendingDockStart = false;
     hasLiveConnectorTarget = false;
@@ -771,6 +819,7 @@ void ResetPathfinder(bool sendCarrierReset) {
     dockRefreshTimer = 0;
     undockLiveRefreshTimer = 0;
     undockStartPos = Vector3D.Zero;
+    dockStraightStartPos = Vector3D.Zero;
 
     ConfigureSensorVisuals(false);
     if (indicatorLight != null) indicatorLight.Enabled = false;
