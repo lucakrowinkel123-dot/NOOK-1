@@ -124,6 +124,7 @@ public void Main(string argument, UpdateType updateSource) {
     else if (CmdIs(cmd, "EMMA_ReturnRequest", "PF_ReturnRequest")) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
     else if (CmdIs(cmd, "EMMA_MaxSpeedRequest", "PF_MaxSpeedRequest")) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
     else if (CmdIs(cmd, "EMMA_AsteroidSetUpComplete", "PF_AsteroidSetUpComplete")) { commandPrefix = "AsteroidSetUpComplete"; isSendCommand = true; }
+    else if (cmd.Equals("PF_Reset", StringComparison.OrdinalIgnoreCase)) { ResetPathfinder(true); return; }
     else if (CmdIs(cmd, "EMMA_ExcavationSitePathStartRecording", "PF_ExcavationSitePathStartRecording")) { StartRecordingMode(); } 
     else if (CmdIs(cmd, "EMMA_ExcavationSitePathStopRecording", "PF_ExcavationSitePathStopRecording")) { StopRecordingMode(); } 
 
@@ -345,6 +346,40 @@ void GetRotationAngles(Vector3D forward, Vector3D up, out double yaw, out double
 void BroadcastCarrier(string message) {
     IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, message);
     IGC.SendBroadcastMessage(PATHFINDER_CHANNEL_LEGACY, message);
+}
+
+void ResetPathfinder(bool sendCarrierReset) {
+    recordingActive = false;
+    recordingPaused = false;
+    recordingTimer = 0;
+    recordingLastGPS = Vector3D.Zero;
+
+    isSoftLocked = false;
+    setupStep = 0;
+    setupPos1 = Vector3D.Zero;
+    setupPos2 = Vector3D.Zero;
+    hasLastStaggerPoint = false;
+    lastStaggerPos = Vector3D.Zero;
+    autoReturnToStaggerActive = false;
+
+    pathGPS.Clear();
+    pathGPSStrings.Clear();
+    pathOrientations.Clear();
+    pathCloseEnoughs.Clear();
+    pathMaxSpeed = -1;
+
+    blinkRequested = false;
+    blinkTicks = 0;
+    hasEntry1Target = false;
+    entry1Target = Vector3D.Zero;
+    entry1ProximityEnabled = false;
+
+    ConfigureSensorVisuals(false);
+    if (indicatorLight != null) indicatorLight.Enabled = false;
+    StopOverrides();
+
+    if (sendCarrierReset) BroadcastCarrier("Reset");
+    Echo("[PF_Reset] Pathfinder reset complete.");
 }
 
 class GyroControl {

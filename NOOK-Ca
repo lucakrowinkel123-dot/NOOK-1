@@ -82,6 +82,11 @@ public void Main(string argument, UpdateType updateSource)
         SendPathfinderMaxSpeed();
         return;
     }
+    if (argument.Equals("Reset", StringComparison.OrdinalIgnoreCase))
+    {
+        ResetCarrierState();
+        return;
+    }
 
     if (argument.Equals("AsteroidSetUpCancel", StringComparison.OrdinalIgnoreCase))
     {
@@ -706,6 +711,7 @@ void ProcessPathfinderMessage(string s)
     if (s.Equals("PathfinderMaxSpeedRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderMaxSpeedRequest", UpdateType.Script); return; }
     if (s.Equals("PathfinderReturnRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderReturnRequest", UpdateType.Script); return; }
     if (s.Equals("AsteroidSetUpComplete", StringComparison.OrdinalIgnoreCase)) { Main("AsteroidSetUpComplete", UpdateType.Script); return; }
+    if (s.Equals("Reset", StringComparison.OrdinalIgnoreCase)) { Main("Reset", UpdateType.Script); return; }
 }
 
 // --- PATHFINDER RETURN PATH (NOW Path|... ) ---
@@ -812,4 +818,13 @@ void BroadcastPathfinder(string message)
 {
     IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, message);
     IGC.SendBroadcastMessage(PATHFINDER_CHANNEL_LEGACY, message);
+}
+
+void ResetCarrierState()
+{
+    currentSiteN = 1;
+    lastConfirmedField = "";
+    lastConfirmedGps = "";
+    lastConfirmedOrient = "";
+    Echo("Carrier reset complete (runtime state).");
 }
