@@ -51,6 +51,7 @@ Vector3D undockHoldUp = Vector3D.Up;
 Vector3D liveConnectorTarget = Vector3D.Zero;
 bool hasLiveConnectorTarget = false;
 double dockRefreshTimer = 0;
+double undockLiveRefreshTimer = 0;
 const double UNDOCK_DISTANCE = 25.0;
 const double DOCK_REFRESH_DISTANCE = 40.0;
 
@@ -148,6 +149,7 @@ public void Main(string argument, UpdateType updateSource) {
         undockToEntryActive = false;
         dockActive = false;
         pendingDockStart = false;
+        undockLiveRefreshTimer = 0;
         undoReturnTargets.Clear(); undoReturnForwards.Clear(); undoReturnUps.Clear(); undoReturnTargetIndex = 0;
         currentSitePathPoints.Clear(); currentSitePathForwards.Clear(); currentSitePathUps.Clear();
         isSoftLocked = false; setupStep = 0; 
@@ -402,7 +404,7 @@ void UpdateEntry1ProximityIndicator() {
 bool UpdateAutopilotIndicator() {
     if (indicatorLight == null) return false;
     bool ap = autoReturnToStaggerActive || undoReturnActive || undockActive || undockToEntryActive || dockActive || isSoftLocked;
-    if (!ap) return false;
+    if (!ap) { indicatorLight.Enabled = false; return false; }
     indicatorLight.Color = new Color(0, 100, 255);
     indicatorLight.Enabled = true;
     return true;
@@ -415,8 +417,10 @@ void StartUndock() {
     undockMoveDir = connector != null ? Vector3D.Normalize(connector.WorldMatrix.Backward) : Vector3D.Normalize(-remote.WorldMatrix.Forward);
     undockHoldForward = remote.WorldMatrix.Forward;
     undockHoldUp = remote.WorldMatrix.Up;
+    undockLiveRefreshTimer = 0;
     undockToEntryActive = false;
     undockActive = true;
+    BroadcastCarrier("LiveDockDataRequest");
     Echo("[Undock] Starting straight undock.");
 }
 
@@ -428,7 +432,14 @@ void ApplyUndock(double dt) {
         Echo("[Undock] Canceled by pilot input.");
         return;
     }
-    gyroControl?.FaceVectors(undockHoldForward, undockHoldUp, dt);
+    undockLiveRefreshTimer += dt;
+    if (undockLiveRefreshTimer >= 0.5) {
+        undockLiveRefreshTimer = 0;
+        BroadcastCarrier("LiveDockDataRequest");
+    }
+    Vector3D holdF = hasEntry1Target ? entry1Forward : undockHoldForward;
+    Vector3D holdU = hasEntry1Target ? entry1Up : undockHoldUp;
+    gyroControl?.FaceVectors(holdF, holdU, dt);
     Vector3D traveled = remote.GetPosition() - undockStartPos;
     double progress = Vector3D.Dot(traveled, undockMoveDir);
     if (progress >= UNDOCK_DISTANCE) {
@@ -472,8 +483,15 @@ void ApplyUndockToEntry(double dt) {
 
     Vector3D delta = entry1Target - remote.GetPosition();
     double distance = delta.Length();
-    // Match carrier-aligned entry orientation during transit.
-    gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
+    undockLiveRefreshTimer += dt;
+    if (undockLiveRefreshTimer >= 0.5) {
+        undockLiveRefreshTimer = 0;
+        BroadcastCarrier("LiveDockDataRequest");
+    }
+    // Prefer live Ca entry orientation while transiting.
+    Vector3D holdF = hasEntry1Target ? entry1Forward : undockHoldForward;
+    Vector3D holdU = hasEntry1Target ? entry1Up : undockHoldUp;
+    gyroControl?.FaceVectors(holdF, holdU, dt);
 
     if (distance <= 2.0) {
         undockToEntryActive = false;
@@ -724,6 +742,7 @@ void ResetPathfinder(bool sendCarrierReset) {
     hasLiveConnectorTarget = false;
     liveConnectorTarget = Vector3D.Zero;
     dockRefreshTimer = 0;
+    undockLiveRefreshTimer = 0;
     undockStartPos = Vector3D.Zero;
 
     ConfigureSensorVisuals(false);
