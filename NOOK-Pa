@@ -1,10 +1,12 @@
-const string LCD_PATH_NAME = "ANOUK-PF LCD 1"; 
-const string LCD_CONFIRM_NAME = "ANOUK-PF LCD 2"; 
-const string INDICATOR_NAME = "ANOUK-PF Indicator Light"; 
-const string SOUND_BLOCK_NAME = "ANOUK-PF Sound Block"; 
-const string SENSOR_TAG = "ANOUK-PF Sensor"; // Ensure your sensor has this name
-const string PATHFINDER_CHANNEL = "ANOUK-Ca_PathFinder_Channel"; 
-const string REMOTE_TAG = "ANOUK-PF Remote Control"; 
+const string LCD_PATH_NAME = "EMM-A PF LCD 1"; 
+const string LCD_CONFIRM_NAME = "EMM-A PF LCD 2"; 
+const string INDICATOR_NAME = "EMM-A PF Indicator Light"; 
+const string SOUND_BLOCK_NAME = "EMM-A PF Sound Block"; 
+const string SENSOR_TAG = "EMM-A PF Sensor"; // Ensure your sensor has this name
+const string PATHFINDER_CHANNEL = "EMM-A Ca_PathFinder_Channel"; 
+const string PATHFINDER_CHANNEL_LEGACY = "ANOUK-Ca_PathFinder_Channel";
+const string REMOTE_TAG = "EMM-A PF Remote Control"; 
+const string CONNECTOR_TAG = "EMM-A PF Connector";
 const double CLOSE_ENOUGH_DEFAULT = 1.0; 
 
 // PID TUNING FOR STABILITY
@@ -12,9 +14,15 @@ const double gyroP = 0.5; const double gyroI = 0.002; const double gyroD = 0.5; 
 
 IMyTextPanel lcdPath; IMyTextPanel lcdConfirm; IMyLightingBlock indicatorLight; IMySoundBlock soundBlock; IMyRemoteControl remote; 
 IMySensorBlock sensor; // Added sensor reference
+IMyShipConnector connector;
 GyroControl gyroControl;
 
 bool blinkRequested = false; int blinkTicks = 0; Color blinkColor = new Color(0, 255, 0); 
+bool hasEntry1Target = false;
+Vector3D entry1Target = Vector3D.Zero;
+bool entry1ProximityEnabled = false;
+const double ENTRY1_RED_DISTANCE = 50.0;
+const double ENTRY1_GREEN_DISTANCE = 5.0;
 
 // Path data 
 List<Vector3D> pathGPS = new List<Vector3D>(); 
@@ -22,6 +30,30 @@ List<string> pathGPSStrings = new List<string>();
 List<string> pathOrientations = new List<string>(); 
 List<double> pathCloseEnoughs = new List<double>(); 
 double pathMaxSpeed = -1; 
+List<Vector3D> currentSitePathPoints = new List<Vector3D>();
+List<Vector3D> currentSitePathForwards = new List<Vector3D>();
+List<Vector3D> currentSitePathUps = new List<Vector3D>();
+Vector3D entry1Forward = Vector3D.Forward;
+Vector3D entry1Up = Vector3D.Up;
+bool undoReturnActive = false;
+int undoReturnTargetIndex = 0;
+List<Vector3D> undoReturnTargets = new List<Vector3D>();
+List<Vector3D> undoReturnForwards = new List<Vector3D>();
+List<Vector3D> undoReturnUps = new List<Vector3D>();
+bool undockActive = false;
+bool undockToEntryActive = false;
+bool dockActive = false;
+bool pendingDockStart = false;
+Vector3D undockStartPos = Vector3D.Zero;
+Vector3D undockMoveDir = Vector3D.Backward;
+Vector3D undockHoldForward = Vector3D.Forward;
+Vector3D undockHoldUp = Vector3D.Up;
+Vector3D liveConnectorTarget = Vector3D.Zero;
+bool hasLiveConnectorTarget = false;
+double dockRefreshTimer = 0;
+double undockLiveRefreshTimer = 0;
+const double UNDOCK_DISTANCE = 25.0;
+const double DOCK_REFRESH_DISTANCE = 40.0;
 
 // ---- RECORDING MODE STATE ---- 
 bool recordingActive = false; bool recordingPaused = false; 
@@ -35,10 +67,18 @@ MatrixD lockedMatrix;
 int setupStep = 0;
 Vector3D setupPos1 = Vector3D.Zero;
 Vector3D setupPos2 = Vector3D.Zero;
+bool hasLastStaggerPoint = false;
+Vector3D lastStaggerPos = Vector3D.Zero;
+Vector3D autoReturnHoldForward = Vector3D.Forward;
+Vector3D autoReturnHoldUp = Vector3D.Up;
+bool autoReturnToStaggerActive = false;
+const double AUTO_RETURN_CLOSE = 2.0;
+const double AUTO_RETURN_MAX_SPEED = 2.5;
 
 public Program() { 
     Runtime.UpdateFrequency = UpdateFrequency.Update10; 
     IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL); 
+    IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL_LEGACY);
 } 
 
 public void Main(string argument, UpdateType updateSource) { 
@@ -48,6 +88,7 @@ public void Main(string argument, UpdateType updateSource) {
     remote = GridTerminalSystem.GetBlockWithName(REMOTE_TAG) as IMyRemoteControl; 
     sensor = GridTerminalSystem.GetBlockWithName(SENSOR_TAG) as IMySensorBlock; // Initialize sensor
     soundBlock = GridTerminalSystem.GetBlockWithName(SOUND_BLOCK_NAME) as IMySoundBlock; 
+    connector = GridTerminalSystem.GetBlockWithName(CONNECTOR_TAG) as IMyShipConnector;
 
     if (remote != null && gyroControl == null) {
         List<IMyGyro> gyros = new List<IMyGyro>();
@@ -61,7 +102,7 @@ public void Main(string argument, UpdateType updateSource) {
     bool isSendCommand = false; 
 
     // --- NEW 3-STEP SETUP WITH SENSOR VISUALS ---
-    if (cmd.Equals("PF_ExcavationSiteSetUpComplete", StringComparison.OrdinalIgnoreCase)) {
+    if (CmdIs(cmd, "EMMA_ExcavationSiteSetUpComplete", "PF_ExcavationSiteSetUpComplete")) {
         if (remote == null) return;
         setupStep++;
         if (setupStep == 1) {
@@ -80,32 +121,63 @@ public void Main(string argument, UpdateType updateSource) {
             string gpsA = $"GPS:CornerA:{setupPos1.X:F2}:{setupPos1.Y:F2}:{setupPos1.Z:F2}:";
             string gpsB = $"GPS:CornerB:{setupPos2.X:F2}:{setupPos2.Y:F2}:{setupPos2.Z:F2}:";
             string msg = $"ExcavationSiteSetUpComplete|{orient}|{gpsA}|{gpsB}";
-            IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg);
+            BroadcastCarrier(msg);
             Echo($"Sent Setup: {msg}");
+            autoReturnHoldForward = lockedMatrix.Forward;
+            autoReturnHoldUp = lockedMatrix.Up;
+            entry1ProximityEnabled = true;
             setupStep = 0; isSoftLocked = false; 
             ConfigureSensorVisuals(false); // TURN OFF VISUAL GUIDE
             StopOverrides();
+            StartAutoReturnToStagger();
         }
     }
 
     // --- STANDARD COMMANDS --- 
-    else if (cmd.Equals("PF_ExcavationSitePathAdd", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "ExcavationSitePathAdd"; isSendCommand = true; } 
-    else if (cmd.Equals("PF_ExcavationSiteStagger", StringComparison.OrdinalIgnoreCase)) { 
+    else if (CmdIs(cmd, "EMMA_ExcavationSitePathAdd", "PF_ExcavationSitePathAdd")) { commandPrefix = "ExcavationSitePathAdd"; isSendCommand = true; } 
+    else if (CmdIs(cmd, "EMMA_ExcavationSiteStagger", "PF_ExcavationSiteStagger")) { 
         commandPrefix = "ExcavationSiteStagger"; isSendCommand = true; 
         if (recordingActive) StopRecordingMode(); 
         ConfigureSensorVisuals(true); // Turn on visuals for stagger alignment
     } 
-    else if (cmd.Equals("PF_ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase)) { 
+    else if (CmdIs(cmd, "EMMA_ExcavationSiteCancel", "PF_ExcavationSiteCancel")) { 
         commandPrefix = "ExcavationSiteCancel"; isSendCommand = true; 
         if (recordingActive) StopRecordingMode();
+        autoReturnToStaggerActive = false;
+        undoReturnActive = false;
+        undockActive = false;
+        undockToEntryActive = false;
+        dockActive = false;
+        pendingDockStart = false;
+        undockLiveRefreshTimer = 0;
+        undoReturnTargets.Clear(); undoReturnForwards.Clear(); undoReturnUps.Clear(); undoReturnTargetIndex = 0;
+        currentSitePathPoints.Clear(); currentSitePathForwards.Clear(); currentSitePathUps.Clear();
         isSoftLocked = false; setupStep = 0; 
         ConfigureSensorVisuals(false); // Clean up visuals
         StopOverrides();
     } 
-    else if (cmd.Equals("PF_ReturnRequest", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
-    else if (cmd.Equals("PF_MaxSpeedRequest", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
-    else if (cmd.Equals("PF_ExcavationSitePathStartRecording", StringComparison.OrdinalIgnoreCase)) { StartRecordingMode(); } 
-    else if (cmd.Equals("PF_ExcavationSitePathStopRecording", StringComparison.OrdinalIgnoreCase)) { StopRecordingMode(); } 
+    else if (cmd.Equals("PF_ExcavationSitePathUndo", StringComparison.OrdinalIgnoreCase)) {
+        commandPrefix = "ExcavationSitePathUndo"; isSendCommand = true;
+        if (recordingActive) StopRecordingMode();
+    }
+    else if (cmd.Equals("PF_ExcavationSitePathUndoAndReturn", StringComparison.OrdinalIgnoreCase)) {
+        commandPrefix = "ExcavationSitePathUndo"; isSendCommand = true;
+        if (recordingActive) StopRecordingMode();
+        BeginUndoAndReturn();
+    }
+    else if (cmd.Equals("PF_AsteroidSetUpCancel", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "AsteroidSetUpCancel"; isSendCommand = true; }
+    else if (cmd.Equals("PF_Undock", StringComparison.OrdinalIgnoreCase)) { StartUndock(); return; }
+    else if (cmd.Equals("PF_Dock", StringComparison.OrdinalIgnoreCase)) {
+        pendingDockStart = true;
+        BroadcastCarrier("LiveDockDataRequest");
+        return;
+    }
+    else if (CmdIs(cmd, "EMMA_ReturnRequest", "PF_ReturnRequest")) { commandPrefix = "PathfinderReturnRequest"; isSendCommand = true; } 
+    else if (CmdIs(cmd, "EMMA_MaxSpeedRequest", "PF_MaxSpeedRequest")) { commandPrefix = "PathfinderMaxSpeedRequest"; isSendCommand = true; } 
+    else if (CmdIs(cmd, "EMMA_AsteroidSetUpComplete", "PF_AsteroidSetUpComplete")) { commandPrefix = "AsteroidSetUpComplete"; isSendCommand = true; }
+    else if (cmd.Equals("PF_Reset", StringComparison.OrdinalIgnoreCase)) { ResetPathfinder(true); return; }
+    else if (CmdIs(cmd, "EMMA_ExcavationSitePathStartRecording", "PF_ExcavationSitePathStartRecording")) { StartRecordingMode(); } 
+    else if (CmdIs(cmd, "EMMA_ExcavationSitePathStopRecording", "PF_ExcavationSitePathStopRecording")) { StopRecordingMode(); } 
 
     // --- SEND COMMAND --- 
     if (isSendCommand) { 
@@ -113,12 +185,23 @@ public void Main(string argument, UpdateType updateSource) {
         if (commandPrefix == "ExcavationSitePathAdd" || commandPrefix == "ExcavationSiteStagger") { 
             if (remote == null) { Echo("No remote found!"); return; } 
             var pos = remote.GetPosition(); 
+            if (commandPrefix == "ExcavationSiteStagger") { 
+                lastStaggerPos = pos; 
+                autoReturnHoldForward = remote.WorldMatrix.Forward;
+                autoReturnHoldUp = remote.WorldMatrix.Up;
+                hasLastStaggerPoint = true; 
+            }
+            if (commandPrefix == "ExcavationSitePathAdd") {
+                currentSitePathPoints.Add(pos);
+                currentSitePathForwards.Add(remote.WorldMatrix.Forward);
+                currentSitePathUps.Add(remote.WorldMatrix.Up);
+            }
             string gps = $"GPS:Site:{pos.X:F2}:{pos.Y:F2}:{pos.Z:F2}:"; 
             double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
             string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
             msg = $"{commandPrefix}|{gps}|{orient}"; 
         } else { msg = commandPrefix; } 
-        IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg); Echo($"Sent: {msg}"); 
+        BroadcastCarrier(msg); Echo($"Sent: {msg}"); 
     } 
 
     // --- IGC LISTENING --- 
@@ -130,15 +213,25 @@ public void Main(string argument, UpdateType updateSource) {
                 if (str.StartsWith("Confirmed_Entry|")) HandleConfirmedEntry(str); 
                 else if (str.StartsWith("Path|")) HandlePathMessage(str); 
                 else if (str.StartsWith("PathfinderMaxSpeed|")) HandleMaxSpeed(str); 
+                else if (str.StartsWith("LiveDockData|")) HandleLiveDockData(str);
             } 
         } 
     } 
 
     // --- BLINK --- 
     if (blinkRequested && indicatorLight != null) { blinkTicks++; if (blinkTicks >= 5) { indicatorLight.Enabled = false; blinkRequested = false; } } 
+    if (!blinkRequested) {
+        bool apLight = UpdateAutopilotIndicator();
+        if (!apLight) UpdateEntry1ProximityIndicator();
+    }
 
     // --- SOFT LOCK & RECORDING LOGIC --- 
     if (isSoftLocked && remote != null) ApplySoftLock(deltaTime);
+    if (autoReturnToStaggerActive && remote != null) ApplyAutoReturnToStagger(deltaTime);
+    if (undoReturnActive && remote != null) ApplyUndoAndReturn(deltaTime);
+    if (undockActive && remote != null) ApplyUndock(deltaTime);
+    if (undockToEntryActive && remote != null) ApplyUndockToEntry(deltaTime);
+    if (dockActive && remote != null) ApplyDock(deltaTime);
 
     if (recordingActive && !recordingPaused && remote != null) { 
         recordingTimer += deltaTime; 
@@ -149,6 +242,11 @@ public void Main(string argument, UpdateType updateSource) {
     } 
     OutputPathStatus(); 
 } 
+
+bool CmdIs(string cmd, string primary, string legacy) {
+    return cmd.Equals(primary, StringComparison.OrdinalIgnoreCase) ||
+           cmd.Equals(legacy, StringComparison.OrdinalIgnoreCase);
+}
 
 // --- SENSOR CONFIGURATION HELPER ---
 void ConfigureSensorVisuals(bool active) {
@@ -189,6 +287,51 @@ void ApplySoftLock(double dt) {
     } else StopThrusterOverrides();
 }
 
+void StartAutoReturnToStagger() {
+    if (!hasLastStaggerPoint || remote == null) return;
+    autoReturnToStaggerActive = true;
+    Echo("[AutoReturn] Navigating to stagger point...");
+}
+
+void ApplyAutoReturnToStagger(double dt) {
+    if (remote == null) return;
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        autoReturnToStaggerActive = false;
+        StopOverrides();
+        Echo("[AutoReturn] Canceled by pilot input.");
+        return;
+    }
+
+    Vector3D delta = lastStaggerPos - remote.GetPosition();
+    double distance = delta.Length();
+    if (distance <= AUTO_RETURN_CLOSE) {
+        autoReturnToStaggerActive = false;
+        StopOverrides(); // release control back to pilot
+        currentSitePathPoints.Clear();
+        currentSitePathForwards.Clear();
+        currentSitePathUps.Clear();
+        if (!recordingActive) StartRecordingMode();
+        Echo("[AutoReturn] Reached stagger point. Pilot control restored. Recording started.");
+        return;
+    }
+
+    // Keep the excavation-complete orientation for the full move.
+    gyroControl?.FaceVectors(autoReturnHoldForward, autoReturnHoldUp, dt);
+
+    Vector3D desiredVel = Vector3D.Zero;
+    if (distance > 0.01)
+        desiredVel = Vector3D.Normalize(delta) * MathHelper.Clamp(distance / 4.0, 0.4, AUTO_RETURN_MAX_SPEED);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+
+    List<IMyThrust> thrusters = new List<IMyThrust>(); 
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
+}
+
 void StartRecordingMode() { recordingActive = true; recordingPaused = true; recordingTimer = 0; recordingLastGPS = remote != null ? remote.GetPosition() : Vector3D.Zero; SendPFExcavationSitePathAdd(); Echo("[Recording Mode] Started."); } 
 void StopRecordingMode() { recordingActive = false; recordingPaused = false; recordingTimer = 0; recordingLastGPS = Vector3D.Zero; Echo("[Recording Mode] Stopped."); } 
 
@@ -198,7 +341,7 @@ void SendPFExcavationSitePathAdd() {
     double yaw, pitch, roll; GetRotationAngles(remote.WorldMatrix.Forward, remote.WorldMatrix.Up, out yaw, out pitch, out roll); 
     string orient = $"{yaw:F2},{pitch:F2},{roll:F2}"; 
     string msg = $"ExcavationSitePathAdd|{gps}|{orient}"; 
-    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, msg); Echo($"[Recording] Sent: {msg}"); 
+    BroadcastCarrier(msg); Echo($"[Recording] Sent: {msg}"); 
 } 
 
 void HandleMaxSpeed(string msg) { 
@@ -215,7 +358,7 @@ void HandlePathMessage(string msg) {
         double closeEnough = CLOSE_ENOUGH_DEFAULT; 
         if (idx < parts.Length && double.TryParse(parts[idx], out closeEnough)) { pathCloseEnoughs.Add(closeEnough); idx++; } else { pathCloseEnoughs.Add(CLOSE_ENOUGH_DEFAULT); } 
     } 
-    pathMaxSpeed = -1; IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, "PathfinderMaxSpeedRequest"); Echo("Path stored."); 
+    pathMaxSpeed = -1; BroadcastCarrier("PathfinderMaxSpeedRequest"); Echo("Path stored."); 
 } 
 
 void OutputPathStatus() { 
@@ -236,8 +379,314 @@ void HandleConfirmedEntry(string msg) {
     if (lcdConfirm != null) { lcdConfirm.ContentType = VRage.Game.GUI.TextPanel.ContentType.TEXT_AND_IMAGE; lcdConfirm.WriteText(output); } 
     if (indicatorLight != null) { indicatorLight.Color = blinkColor; indicatorLight.Enabled = true; blinkRequested = true; blinkTicks = 0; } 
     if (soundBlock != null) { soundBlock.SelectedSound = "Alert 2"; soundBlock.Play(); } 
+    if (parts[1].Equals("ExcavationSiteEntry1", StringComparison.OrdinalIgnoreCase)) {
+        Vector3D p;
+        if (TryParseGPS(parts[2], out p)) { entry1Target = p; hasEntry1Target = true; }
+        Vector3D f, u;
+        if (TryParseOrientation(parts[3], out f, out u)) { entry1Forward = f; entry1Up = u; }
+    }
     if (recordingActive) { Vector3D p; if (TryParseGPS(parts[2], out p)) { recordingLastGPS = p; recordingTimer = 0; recordingPaused = false; } } 
 } 
+
+void UpdateEntry1ProximityIndicator() {
+    if (!entry1ProximityEnabled || !hasEntry1Target || indicatorLight == null || remote == null) return;
+    double d = Vector3D.Distance(remote.GetPosition(), entry1Target);
+    if (d > ENTRY1_RED_DISTANCE) return; // outside 50m = normal indicator behavior
+    double t;
+    if (d <= ENTRY1_GREEN_DISTANCE) t = 1;
+    else t = (ENTRY1_RED_DISTANCE - d) / (ENTRY1_RED_DISTANCE - ENTRY1_GREEN_DISTANCE);
+    int r = (int)MathHelper.Clamp(255 * (1 - t), 0, 255);
+    int g = (int)MathHelper.Clamp(255 * t, 0, 255);
+    indicatorLight.Color = new Color(r, g, 0);
+    indicatorLight.Enabled = true;
+}
+
+bool UpdateAutopilotIndicator() {
+    if (indicatorLight == null) return false;
+    bool ap = autoReturnToStaggerActive || undoReturnActive || undockActive || undockToEntryActive || dockActive || isSoftLocked;
+    if (!ap) { indicatorLight.Enabled = false; return false; }
+    indicatorLight.Color = new Color(0, 100, 255);
+    indicatorLight.Enabled = true;
+    return true;
+}
+
+void StartUndock() {
+    if (remote == null) return;
+    if (connector != null && connector.Status == MyShipConnectorStatus.Connected) connector.Disconnect();
+    undockStartPos = remote.GetPosition();
+    undockMoveDir = connector != null ? Vector3D.Normalize(connector.WorldMatrix.Backward) : Vector3D.Normalize(-remote.WorldMatrix.Forward);
+    undockHoldForward = remote.WorldMatrix.Forward;
+    undockHoldUp = remote.WorldMatrix.Up;
+    undockLiveRefreshTimer = 0;
+    undockToEntryActive = false;
+    undockActive = true;
+    BroadcastCarrier("LiveDockDataRequest");
+    Echo("[Undock] Starting straight undock.");
+}
+
+void ApplyUndock(double dt) {
+    if (remote == null) return;
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        undockActive = false;
+        StopOverrides();
+        Echo("[Undock] Canceled by pilot input.");
+        return;
+    }
+    undockLiveRefreshTimer += dt;
+    if (undockLiveRefreshTimer >= 0.5) {
+        undockLiveRefreshTimer = 0;
+        BroadcastCarrier("LiveDockDataRequest");
+    }
+    Vector3D holdF = hasEntry1Target ? entry1Forward : undockHoldForward;
+    Vector3D holdU = hasEntry1Target ? entry1Up : undockHoldUp;
+    gyroControl?.FaceVectors(holdF, holdU, dt);
+    Vector3D traveled = remote.GetPosition() - undockStartPos;
+    double progress = Vector3D.Dot(traveled, undockMoveDir);
+    if (progress >= UNDOCK_DISTANCE) {
+        undockActive = false;
+        StopThrusterOverrides();
+        if (hasEntry1Target) {
+            undockToEntryActive = true;
+            Echo("[Undock] Completed 25m. Continuing to Entry1.");
+        } else {
+            StopOverrides();
+            Echo("[Undock] Completed 25m straight departure (no Entry1 target).");
+        }
+        return;
+    }
+
+    double remaining = UNDOCK_DISTANCE - progress;
+    Vector3D desiredVel = undockMoveDir * MathHelper.Clamp(remaining / 4.0, 0.4, 1.6);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+    List<IMyThrust> thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
+}
+
+void ApplyUndockToEntry(double dt) {
+    if (remote == null || !hasEntry1Target) {
+        undockToEntryActive = false;
+        StopOverrides();
+        Echo("[Undock] No Entry1 target. Transit stopped.");
+        return;
+    }
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        undockToEntryActive = false;
+        StopOverrides();
+        Echo("[Undock] Entry transit canceled by pilot input.");
+        return;
+    }
+
+    Vector3D delta = entry1Target - remote.GetPosition();
+    double distance = delta.Length();
+    undockLiveRefreshTimer += dt;
+    if (undockLiveRefreshTimer >= 0.5) {
+        undockLiveRefreshTimer = 0;
+        BroadcastCarrier("LiveDockDataRequest");
+    }
+    // Prefer live Ca entry orientation while transiting.
+    Vector3D holdF = hasEntry1Target ? entry1Forward : undockHoldForward;
+    Vector3D holdU = hasEntry1Target ? entry1Up : undockHoldUp;
+    gyroControl?.FaceVectors(holdF, holdU, dt);
+
+    if (distance <= 2.0) {
+        undockToEntryActive = false;
+        StopOverrides();
+        Echo("[Undock] Reached Entry1.");
+        return;
+    }
+
+    Vector3D desiredVel = Vector3D.Zero;
+    if (distance > 0.01)
+        desiredVel = Vector3D.Normalize(delta) * MathHelper.Clamp(distance / 6.0, 0.3, 1.6);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+    List<IMyThrust> thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
+}
+
+void StartDock()
+{
+    if (remote == null) return;
+    if (!hasEntry1Target || !hasLiveConnectorTarget) { Echo("[Dock] Waiting for live dock data."); return; }
+    double dEntry = Vector3D.Distance(remote.GetPosition(), entry1Target);
+    if (dEntry > ENTRY1_RED_DISTANCE) { Echo("[Dock] Move inside Entry1 50m bubble first."); return; }
+    dockActive = true;
+    pendingDockStart = false;
+    dockRefreshTimer = 0;
+    Echo("[Dock] Starting dock autopilot.");
+}
+
+void ApplyDock(double dt)
+{
+    if (remote == null || !hasLiveConnectorTarget) {
+        dockActive = false;
+        StopOverrides();
+        Echo("[Dock] Missing connector target.");
+        return;
+    }
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        dockActive = false;
+        StopOverrides();
+        Echo("[Dock] Canceled by pilot input.");
+        return;
+    }
+
+    Vector3D delta = liveConnectorTarget - remote.GetPosition();
+    double distance = delta.Length();
+
+    // Keep refreshing Ca orientation/connector while in final stretch.
+    if (distance <= DOCK_REFRESH_DISTANCE) {
+        dockRefreshTimer += dt;
+        if (dockRefreshTimer >= 0.5) {
+            dockRefreshTimer = 0;
+            BroadcastCarrier("LiveDockDataRequest");
+        }
+    }
+
+    gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
+
+    if (distance <= 1.5) {
+        dockActive = false;
+        StopOverrides();
+        if (connector != null && connector.Status == MyShipConnectorStatus.Connectable) connector.Connect();
+        Echo("[Dock] Reached connector target.");
+        return;
+    }
+
+    Vector3D desiredVel = Vector3D.Zero;
+    if (distance > 0.01)
+        desiredVel = Vector3D.Normalize(delta) * MathHelper.Clamp(distance / 5.0, 0.15, 1.1);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+    List<IMyThrust> thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
+}
+
+void BeginUndoAndReturn() {
+    // Remove local last path point to mirror undo intent.
+    if (currentSitePathPoints.Count > 0) {
+        int last = currentSitePathPoints.Count - 1;
+        currentSitePathPoints.RemoveAt(last);
+        currentSitePathForwards.RemoveAt(last);
+        currentSitePathUps.RemoveAt(last);
+    }
+
+    undoReturnTargets.Clear();
+    undoReturnForwards.Clear();
+    undoReturnUps.Clear();
+    undoReturnTargetIndex = 0;
+
+    for (int i = currentSitePathPoints.Count - 1; i >= 0; i--) {
+        undoReturnTargets.Add(currentSitePathPoints[i]);
+        undoReturnForwards.Add(currentSitePathForwards[i]);
+        undoReturnUps.Add(currentSitePathUps[i]);
+    }
+
+    if (hasLastStaggerPoint) {
+        undoReturnTargets.Add(lastStaggerPos);
+        undoReturnForwards.Add(autoReturnHoldForward);
+        undoReturnUps.Add(autoReturnHoldUp);
+    } else if (hasEntry1Target) {
+        undoReturnTargets.Add(entry1Target);
+        undoReturnForwards.Add(entry1Forward);
+        undoReturnUps.Add(entry1Up);
+    }
+
+    if (undoReturnTargets.Count == 0) { Echo("[UndoReturn] No checkpoint to return to."); return; }
+    undoReturnActive = true;
+    Echo($"[UndoReturn] Reversing through {undoReturnTargets.Count} checkpoint(s).");
+}
+
+void ApplyUndoAndReturn(double dt) {
+    if (undoReturnTargetIndex >= undoReturnTargets.Count) {
+        undoReturnActive = false;
+        StopOverrides();
+        Echo("[UndoReturn] Completed.");
+        return;
+    }
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        undoReturnActive = false;
+        StopOverrides();
+        Echo("[UndoReturn] Canceled by pilot input.");
+        return;
+    }
+
+    Vector3D targetPos = undoReturnTargets[undoReturnTargetIndex];
+    Vector3D targetF = undoReturnForwards[undoReturnTargetIndex];
+    Vector3D targetU = undoReturnUps[undoReturnTargetIndex];
+    Vector3D delta = targetPos - remote.GetPosition();
+    double distance = delta.Length();
+    gyroControl?.FaceVectors(targetF, targetU, dt);
+
+    if (distance <= AUTO_RETURN_CLOSE) {
+        undoReturnTargetIndex++;
+        StopThrusterOverrides();
+        return;
+    }
+
+    Vector3D desiredVel = Vector3D.Zero;
+    if (distance > 0.01)
+        desiredVel = Vector3D.Normalize(delta) * MathHelper.Clamp(distance / 4.0, 0.4, AUTO_RETURN_MAX_SPEED);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+
+    List<IMyThrust> thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
+}
+
+bool TryParseOrientation(string orientation, out Vector3D forward, out Vector3D up) {
+    forward = Vector3D.Forward;
+    up = Vector3D.Up;
+    var p = orientation.Split(',');
+    if (p.Length < 3) return false;
+    double yawDeg, pitchDeg, rollDeg;
+    if (!double.TryParse(p[0], out yawDeg)) return false;
+    if (!double.TryParse(p[1], out pitchDeg)) return false;
+    if (!double.TryParse(p[2], out rollDeg)) return false;
+    MatrixD m = MatrixD.CreateFromYawPitchRoll(
+        MathHelper.ToRadians((float)yawDeg),
+        MathHelper.ToRadians((float)pitchDeg),
+        MathHelper.ToRadians((float)rollDeg)
+    );
+    forward = Vector3D.Normalize(m.Forward);
+    up = Vector3D.Normalize(m.Up);
+    return true;
+}
+
+void HandleLiveDockData(string msg)
+{
+    var parts = msg.Split('|');
+    if (parts.Length < 4) return;
+    Vector3D p;
+    if (TryParseGPS(parts[1], out p)) { entry1Target = p; hasEntry1Target = true; }
+    Vector3D f, u;
+    if (parts.Length >= 6 && TryParseVector3(parts[4], out f) && TryParseVector3(parts[5], out u)) {
+        entry1Forward = Vector3D.Normalize(f);
+        entry1Up = Vector3D.Normalize(u);
+    } else if (TryParseOrientation(parts[2], out f, out u)) {
+        entry1Forward = f;
+        entry1Up = u;
+    }
+    if (TryParseGPS(parts[3], out p)) { liveConnectorTarget = p; hasLiveConnectorTarget = true; }
+    if (pendingDockStart) StartDock();
+}
 
 void StopOverrides() { StopThrusterOverrides(); gyroControl?.Reset(); }
 void StopThrusterOverrides() { List<IMyThrust> t = new List<IMyThrust>(); GridTerminalSystem.GetBlocksOfType(t); foreach (var x in t) x.ThrustOverride = 0; }
@@ -247,9 +696,74 @@ bool TryParseGPS(string gps, out Vector3D pos) {
     return double.TryParse(p[2], out pos.X) && double.TryParse(p[3], out pos.Y) && double.TryParse(p[4], out pos.Z); 
 } 
 
+bool TryParseVector3(string raw, out Vector3D v) {
+    v = Vector3D.Zero;
+    var p = raw.Split(',');
+    if (p.Length < 3) return false;
+    return double.TryParse(p[0], out v.X) && double.TryParse(p[1], out v.Y) && double.TryParse(p[2], out v.Z);
+}
+
 void GetRotationAngles(Vector3D forward, Vector3D up, out double yaw, out double pitch, out double roll) { 
     Vector3D left = Vector3D.Cross(up, forward); forward.Normalize(); up.Normalize(); left.Normalize(); 
     yaw = Math.Atan2(forward.X, forward.Z) * (180 / Math.PI); pitch = Math.Asin(forward.Y) * (180 / Math.PI); roll = Math.Atan2(left.Y, up.Y) * (180 / Math.PI); 
+}
+
+void BroadcastCarrier(string message) {
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, message);
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL_LEGACY, message);
+}
+
+void ResetPathfinder(bool sendCarrierReset) {
+    recordingActive = false;
+    recordingPaused = false;
+    recordingTimer = 0;
+    recordingLastGPS = Vector3D.Zero;
+
+    isSoftLocked = false;
+    setupStep = 0;
+    setupPos1 = Vector3D.Zero;
+    setupPos2 = Vector3D.Zero;
+    hasLastStaggerPoint = false;
+    lastStaggerPos = Vector3D.Zero;
+    autoReturnToStaggerActive = false;
+
+    pathGPS.Clear();
+    pathGPSStrings.Clear();
+    pathOrientations.Clear();
+    pathCloseEnoughs.Clear();
+    currentSitePathPoints.Clear();
+    currentSitePathForwards.Clear();
+    currentSitePathUps.Clear();
+    pathMaxSpeed = -1;
+
+    blinkRequested = false;
+    blinkTicks = 0;
+    hasEntry1Target = false;
+    entry1Target = Vector3D.Zero;
+    entry1Forward = Vector3D.Forward;
+    entry1Up = Vector3D.Up;
+    entry1ProximityEnabled = false;
+    undoReturnActive = false;
+    undoReturnTargetIndex = 0;
+    undoReturnTargets.Clear();
+    undoReturnForwards.Clear();
+    undoReturnUps.Clear();
+    undockActive = false;
+    undockToEntryActive = false;
+    dockActive = false;
+    pendingDockStart = false;
+    hasLiveConnectorTarget = false;
+    liveConnectorTarget = Vector3D.Zero;
+    dockRefreshTimer = 0;
+    undockLiveRefreshTimer = 0;
+    undockStartPos = Vector3D.Zero;
+
+    ConfigureSensorVisuals(false);
+    if (indicatorLight != null) indicatorLight.Enabled = false;
+    StopOverrides();
+
+    if (sendCarrierReset) BroadcastCarrier("Reset");
+    Echo("[PF_Reset] Pathfinder reset complete.");
 }
 
 class GyroControl {
