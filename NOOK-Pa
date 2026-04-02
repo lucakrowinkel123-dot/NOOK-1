@@ -58,6 +58,7 @@ double dockRefreshTimer = 0;
 double undockLiveRefreshTimer = 0;
 double connectorApproachDistance = 25.0;
 const double DOCK_REFRESH_DISTANCE = 40.0;
+const double CONNECTOR_APPROACH_CLOSE = 0.5;
 Vector3D dockStraightStartPos = Vector3D.Zero;
 Vector3D dockHoldForward = Vector3D.Forward;
 Vector3D dockHoldUp = Vector3D.Up;
@@ -606,7 +607,7 @@ void ApplyDock(double dt)
 
     gyroControl?.FaceVectors(entry1Forward, entry1Up, dt);
 
-    if (distance <= 1.5) {
+    if (distance <= CONNECTOR_APPROACH_CLOSE) {
         dockActive = false;
         StopOverrides();
         if (connector != null && connector.Status == MyShipConnectorStatus.Connectable) connector.Connect();
