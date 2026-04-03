@@ -33,6 +33,7 @@ double pathMaxSpeed = -1;
 bool automineActive = false;
 bool autominePendingPath = false;
 int autominePathIndex = 0;
+bool automineStartAfterUndock = false;
 List<Vector3D> currentSitePathPoints = new List<Vector3D>();
 List<Vector3D> currentSitePathForwards = new List<Vector3D>();
 List<Vector3D> currentSitePathUps = new List<Vector3D>();
@@ -163,6 +164,7 @@ public void Main(string argument, UpdateType updateSource) {
         dockStraightActive = false;
         automineActive = false;
         autominePendingPath = false;
+        automineStartAfterUndock = false;
         autominePathIndex = 0;
         pendingDockStart = false;
         hasLiveConnectorOrientation = false;
@@ -253,6 +255,11 @@ public void Main(string argument, UpdateType updateSource) {
     if (dockStraightActive && remote != null) ApplyDockStraight(deltaTime);
     if (dockActive && remote != null) ApplyDock(deltaTime);
     if (automineActive && remote != null) ApplyAutomineFollow(deltaTime);
+    if (automineStartAfterUndock && !automineActive && !autominePendingPath && !undockActive && !undockToEntryActive && pathGPS.Count > 0) {
+        automineStartAfterUndock = false;
+        automineActive = true;
+        Echo("[AutoMine] Undock complete. Automine path takeover active.");
+    }
 
     if (recordingActive && !recordingPaused && remote != null) { 
         recordingTimer += deltaTime; 
@@ -382,15 +389,22 @@ void HandlePathMessage(string msg) {
     pathMaxSpeed = -1; BroadcastCarrier("PathfinderMaxSpeedRequest"); Echo("Path stored."); 
     if (autominePendingPath && pathGPS.Count > 0) {
         autominePendingPath = false;
-        automineActive = true;
-        autominePathIndex = 0;
-        Echo($"[AutoMine] Path loaded ({pathGPS.Count} points).");
+        bool firstIsEntry = pathGPSStrings.Count > 0 && pathGPSStrings[0].StartsWith("GPS:Entry:", StringComparison.OrdinalIgnoreCase);
+        autominePathIndex = firstIsEntry ? 1 : 0;
+        if (automineStartAfterUndock && (undockActive || undockToEntryActive)) {
+            Echo($"[AutoMine] Path loaded ({pathGPS.Count} points). Waiting for PF_Undock takeover.");
+        } else {
+            automineActive = true;
+            automineStartAfterUndock = false;
+            Echo($"[AutoMine] Path loaded ({pathGPS.Count} points).");
+        }
     }
 } 
 
 void StartAutomine() {
     autominePendingPath = true;
     autominePathIndex = 0;
+    automineStartAfterUndock = undockActive || undockToEntryActive;
     BroadcastCarrier("PathfinderReturnRequest");
     Echo("[AutoMine] Requested path from Ca.");
 }
@@ -398,6 +412,7 @@ void StartAutomine() {
 void StopAutomine(bool clearPending) {
     automineActive = false;
     if (clearPending) autominePendingPath = false;
+    automineStartAfterUndock = false;
     autominePathIndex = 0;
     StopOverrides();
     Echo("[AutoMine] Stopped.");
@@ -443,9 +458,8 @@ void ApplyAutomineFollow(double dt) {
     Vector3D delta = targetRemotePos - remote.GetPosition();
     double distance = delta.Length();
 
-    Vector3D f, u;
-    if (autominePathIndex < pathOrientations.Count && TryParseOrientation(pathOrientations[autominePathIndex], out f, out u))
-        gyroControl?.FaceVectors(f, u, dt);
+    Vector3D faceDir = distance > 0.01 ? Vector3D.Normalize(delta) : remote.WorldMatrix.Forward;
+    gyroControl?.FaceVectors(faceDir, remote.WorldMatrix.Up, dt);
 
     if (distance <= close) {
         autominePathIndex++;
@@ -908,6 +922,7 @@ void ResetPathfinder(bool sendCarrierReset) {
     dockActive = false;
     automineActive = false;
     autominePendingPath = false;
+    automineStartAfterUndock = false;
     autominePathIndex = 0;
     pendingDockStart = false;
     hasLiveConnectorTarget = false;
