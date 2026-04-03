@@ -30,6 +30,9 @@ List<string> pathGPSStrings = new List<string>();
 List<string> pathOrientations = new List<string>(); 
 List<double> pathCloseEnoughs = new List<double>(); 
 double pathMaxSpeed = -1; 
+bool automineActive = false;
+bool autominePendingPath = false;
+int autominePathIndex = 0;
 List<Vector3D> currentSitePathPoints = new List<Vector3D>();
 List<Vector3D> currentSitePathForwards = new List<Vector3D>();
 List<Vector3D> currentSitePathUps = new List<Vector3D>();
@@ -82,6 +85,7 @@ Vector3D autoReturnHoldUp = Vector3D.Up;
 bool autoReturnToStaggerActive = false;
 const double AUTO_RETURN_CLOSE = 2.0;
 const double AUTO_RETURN_MAX_SPEED = 2.5;
+const double UNDO_RETURN_POINT_CLOSE = 0.5;
 
 public Program() { 
     Runtime.UpdateFrequency = UpdateFrequency.Update10; 
@@ -157,6 +161,9 @@ public void Main(string argument, UpdateType updateSource) {
         undockToEntryActive = false;
         dockActive = false;
         dockStraightActive = false;
+        automineActive = false;
+        autominePendingPath = false;
+        autominePathIndex = 0;
         pendingDockStart = false;
         hasLiveConnectorOrientation = false;
         undockLiveRefreshTimer = 0;
@@ -177,6 +184,8 @@ public void Main(string argument, UpdateType updateSource) {
     }
     else if (cmd.Equals("PF_AsteroidSetUpCancel", StringComparison.OrdinalIgnoreCase)) { commandPrefix = "AsteroidSetUpCancel"; isSendCommand = true; }
     else if (cmd.Equals("PF_Undock", StringComparison.OrdinalIgnoreCase)) { StartUndock(); return; }
+    else if (cmd.Equals("PF_AutoMineStart", StringComparison.OrdinalIgnoreCase)) { StartAutomine(); return; }
+    else if (cmd.Equals("PF_AutoMineStop", StringComparison.OrdinalIgnoreCase)) { StopAutomine(true); return; }
     else if (cmd.Equals("PF_Dock", StringComparison.OrdinalIgnoreCase)) {
         pendingDockStart = true;
         BroadcastCarrier("LiveDockDataRequest");
@@ -243,6 +252,7 @@ public void Main(string argument, UpdateType updateSource) {
     if (undockToEntryActive && remote != null) ApplyUndockToEntry(deltaTime);
     if (dockStraightActive && remote != null) ApplyDockStraight(deltaTime);
     if (dockActive && remote != null) ApplyDock(deltaTime);
+    if (automineActive && remote != null) ApplyAutomineFollow(deltaTime);
 
     if (recordingActive && !recordingPaused && remote != null) { 
         recordingTimer += deltaTime; 
@@ -370,7 +380,89 @@ void HandlePathMessage(string msg) {
         if (idx < parts.Length && double.TryParse(parts[idx], out closeEnough)) { pathCloseEnoughs.Add(closeEnough); idx++; } else { pathCloseEnoughs.Add(CLOSE_ENOUGH_DEFAULT); } 
     } 
     pathMaxSpeed = -1; BroadcastCarrier("PathfinderMaxSpeedRequest"); Echo("Path stored."); 
+    if (autominePendingPath && pathGPS.Count > 0) {
+        autominePendingPath = false;
+        automineActive = true;
+        autominePathIndex = 0;
+        Echo($"[AutoMine] Path loaded ({pathGPS.Count} points).");
+    }
 } 
+
+void StartAutomine() {
+    autominePendingPath = true;
+    autominePathIndex = 0;
+    BroadcastCarrier("PathfinderReturnRequest");
+    Echo("[AutoMine] Requested path from Ca.");
+}
+
+void StopAutomine(bool clearPending) {
+    automineActive = false;
+    if (clearPending) autominePendingPath = false;
+    autominePathIndex = 0;
+    StopOverrides();
+    Echo("[AutoMine] Stopped.");
+}
+
+Vector3D GetDrillCenterOrRemote() {
+    if (remote == null) return Vector3D.Zero;
+    List<IMyShipDrill> drills = new List<IMyShipDrill>();
+    GridTerminalSystem.GetBlocksOfType(drills, d => d.CubeGrid == remote.CubeGrid);
+    if (drills.Count == 0) return remote.GetPosition();
+    Vector3D rp = remote.GetPosition();
+    Vector3D left = remote.WorldMatrix.Left;
+    Vector3D up = remote.WorldMatrix.Up;
+    Vector3D fwd = remote.WorldMatrix.Forward;
+    double minL = double.MaxValue, maxL = double.MinValue;
+    double minU = double.MaxValue, maxU = double.MinValue;
+    double minF = double.MaxValue, maxF = double.MinValue;
+    foreach (var d in drills) {
+        Vector3D rel = d.GetPosition() - rp;
+        double l = Vector3D.Dot(rel, left);
+        double u = Vector3D.Dot(rel, up);
+        double f = Vector3D.Dot(rel, fwd);
+        if (l < minL) minL = l; if (l > maxL) maxL = l;
+        if (u < minU) minU = u; if (u > maxU) maxU = u;
+        if (f < minF) minF = f; if (f > maxF) maxF = f;
+    }
+    return rp + left * ((minL + maxL) * 0.5) + up * ((minU + maxU) * 0.5) + fwd * ((minF + maxF) * 0.5);
+}
+
+void ApplyAutomineFollow(double dt) {
+    if (remote == null || !automineActive) return;
+    if (autominePathIndex >= pathGPS.Count) { StopAutomine(false); Echo("[AutoMine] Path complete."); return; }
+    if (remote.MoveIndicator.LengthSquared() > 0.05f || remote.RotationIndicator.LengthSquared() > 0.05f || Math.Abs(remote.RollIndicator) > 0.05f) {
+        StopAutomine(true);
+        Echo("[AutoMine] Canceled by pilot input.");
+        return;
+    }
+    Vector3D target = pathGPS[autominePathIndex];
+    double close = autominePathIndex < pathCloseEnoughs.Count ? pathCloseEnoughs[autominePathIndex] : CLOSE_ENOUGH_DEFAULT;
+    Vector3D center = GetDrillCenterOrRemote();
+    Vector3D offset = center - remote.GetPosition();
+    Vector3D targetRemotePos = target - offset;
+    Vector3D delta = targetRemotePos - remote.GetPosition();
+    double distance = delta.Length();
+
+    Vector3D f, u;
+    if (autominePathIndex < pathOrientations.Count && TryParseOrientation(pathOrientations[autominePathIndex], out f, out u))
+        gyroControl?.FaceVectors(f, u, dt);
+
+    if (distance <= close) {
+        autominePathIndex++;
+        StopThrusterOverrides();
+        return;
+    }
+
+    Vector3D desiredVel = Vector3D.Normalize(delta) * MathHelper.Clamp(distance / 4.0, 0.2, 1.8);
+    Vector3D velErr = desiredVel - remote.GetShipVelocities().LinearVelocity;
+    List<IMyThrust> thrusters = new List<IMyThrust>();
+    GridTerminalSystem.GetBlocksOfType(thrusters);
+    foreach (var t in thrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * 180000) : 0f;
+    }
+}
 
 void OutputPathStatus() { 
     if (lcdPath == null) return; 
@@ -414,7 +506,7 @@ void UpdateEntry1ProximityIndicator() {
 
 bool UpdateAutopilotIndicator() {
     if (indicatorLight == null) return false;
-    bool ap = autoReturnToStaggerActive || undoReturnActive || undockActive || undockToEntryActive || dockStraightActive || dockActive || isSoftLocked;
+    bool ap = autoReturnToStaggerActive || undoReturnActive || undockActive || undockToEntryActive || dockStraightActive || dockActive || automineActive || isSoftLocked;
     if (!ap) { indicatorLight.Enabled = false; return false; }
     indicatorLight.Color = new Color(0, 100, 255);
     indicatorLight.Enabled = true;
@@ -684,7 +776,7 @@ void ApplyUndoAndReturn(double dt) {
     double distance = delta.Length();
     gyroControl?.FaceVectors(targetF, targetU, dt);
 
-    if (distance <= AUTO_RETURN_CLOSE) {
+    if (distance <= UNDO_RETURN_POINT_CLOSE) {
         undoReturnTargetIndex++;
         StopThrusterOverrides();
         return;
@@ -814,6 +906,9 @@ void ResetPathfinder(bool sendCarrierReset) {
     undockToEntryActive = false;
     dockStraightActive = false;
     dockActive = false;
+    automineActive = false;
+    autominePendingPath = false;
+    autominePathIndex = 0;
     pendingDockStart = false;
     hasLiveConnectorTarget = false;
     liveConnectorTarget = Vector3D.Zero;
