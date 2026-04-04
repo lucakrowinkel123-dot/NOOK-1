@@ -3,14 +3,16 @@
 
 const string LCD_TAG = "EMM-A Ca LCD Data";
 const string FIELD_DB_NAME = "EMM-A Ca A-Field DB";
+const string FIELD_DB_NAME_LEGACY = "ANOUK-Ca A-Field DB";
 const int MAX_ASTEROIDS_PER_BLOCK = 5;
 const string PATHFINDER_CHANNEL = "EMM-A Ca_PathFinder_Channel";
+const string PATHFINDER_CHANNEL_LEGACY = "ANOUK-Ca_PathFinder_Channel";
 const string REMOTE_NAME = "EMM-A Ca Remote Control";
+const string REMOTE_NAME_LEGACY = "ANOUK-Ca Remote Control";
 const string CONNECTOR_NAME = "EMM-A Ca Connector";
+const string CONNECTOR_NAME_LEGACY = "ANOUK-Ca Connector";
 const string ASTEROID_DB_PREFIX = "EMM-A Ca ";
-const string ACTIVE_SECTION = "Runtime";
-const string ACTIVE_DB_KEY = "ActiveAsteroidDB";
-const string ACTIVE_ASTEROID_KEY = "ActiveAsteroidSection";
+const string ASTEROID_DB_PREFIX_LEGACY = "ANOUK-Ca ";
 
 // Lists for asteroid databases and LCDs
 List<IMyTimerBlock> asteroidDatabases = new List<IMyTimerBlock>();
@@ -29,6 +31,7 @@ public Program()
 {
     Runtime.UpdateFrequency = UpdateFrequency.Update100;
     IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL);
+    IGC.RegisterBroadcastListener(PATHFINDER_CHANNEL_LEGACY);
 }
 
 public void Main(string argument, UpdateType updateSource)
@@ -36,26 +39,29 @@ public void Main(string argument, UpdateType updateSource)
     // --- BLOCK LOOKUPS ---
     // Find remote control and field DB first
     List<IMyRemoteControl> remotes = new List<IMyRemoteControl>();
-    GridTerminalSystem.GetBlocksOfType(remotes, r => r.CustomName.Contains(REMOTE_NAME));
+    GridTerminalSystem.GetBlocksOfType(remotes, r => r.CustomName.Contains(REMOTE_NAME) || r.CustomName.Contains(REMOTE_NAME_LEGACY));
     remote = remotes.Count > 0 ? remotes[0] : null;
     List<IMyTimerBlock> fieldBlocks = new List<IMyTimerBlock>();
     GridTerminalSystem.GetBlocksOfType(fieldBlocks, b =>
-        b.CustomName.IndexOf(FIELD_DB_NAME, StringComparison.OrdinalIgnoreCase) >= 0);
+        b.CustomName.IndexOf(FIELD_DB_NAME, StringComparison.OrdinalIgnoreCase) >= 0 ||
+        b.CustomName.IndexOf(FIELD_DB_NAME_LEGACY, StringComparison.OrdinalIgnoreCase) >= 0);
     fieldDatabase = fieldBlocks.Count > 0 ? fieldBlocks[0] : null;
     List<IMyShipConnector> connectors = new List<IMyShipConnector>();
     GridTerminalSystem.GetBlocksOfType(connectors, c =>
-        c.CustomName.IndexOf(CONNECTOR_NAME, StringComparison.OrdinalIgnoreCase) >= 0);
+        c.CustomName.IndexOf(CONNECTOR_NAME, StringComparison.OrdinalIgnoreCase) >= 0 ||
+        c.CustomName.IndexOf(CONNECTOR_NAME_LEGACY, StringComparison.OrdinalIgnoreCase) >= 0);
     carrierConnector = connectors.Count > 0 ? connectors[0] : null;
 
     // --- SAFETY CHECKS ---
-    if (remote == null) { Echo("EMM-A Ca Remote Control not found"); return; }
+    if (remote == null) { Echo("EMM-A Ca/ANOUK-Ca Remote Control not found"); return; }
     if (fieldDatabase == null) { Echo("Field database block not found."); return; }
 
     // Now resolve zone and load asteroid DB blocks for this zone
     string currentZone = GetAsteroidZone(remote.GetPosition());
     asteroidDatabases.Clear();
     GridTerminalSystem.GetBlocksOfType(asteroidDatabases, b =>
-        b.CustomName.StartsWith(ASTEROID_DB_PREFIX + currentZone + " A-DB HD"));
+        b.CustomName.StartsWith(ASTEROID_DB_PREFIX + currentZone + " A-DB HD") ||
+        b.CustomName.StartsWith(ASTEROID_DB_PREFIX_LEGACY + currentZone + " A-DB HD"));
     if (asteroidDatabases.Count == 0) { Echo("No asteroid database blocks found for zone: " + currentZone); return; }
 
     outputLCDs.Clear();
@@ -87,11 +93,6 @@ public void Main(string argument, UpdateType updateSource)
     if (argument.Equals("LiveDockDataRequest", StringComparison.OrdinalIgnoreCase))
     {
         SendLiveDockData();
-        return;
-    }
-    if (argument.Equals("ActiveAsteroidSnapshotRequest", StringComparison.OrdinalIgnoreCase))
-    {
-        SendActiveAsteroidSnapshot();
         return;
     }
     if (argument.Equals("Reset", StringComparison.OrdinalIgnoreCase))
@@ -211,7 +212,7 @@ public void Main(string argument, UpdateType updateSource)
         {
             MyIGCMessage msg = listener.AcceptMessage();
             string s = null;
-            if (listener.Tag == PATHFINDER_CHANNEL && msg.Data is string)
+            if ((listener.Tag == PATHFINDER_CHANNEL || listener.Tag == PATHFINDER_CHANNEL_LEGACY) && msg.Data is string)
             {
                 s = (string)msg.Data;
                 ProcessPathfinderMessage(s);
@@ -836,7 +837,6 @@ void ProcessPathfinderMessage(string s)
     if (s.StartsWith("ExcavationSiteCancel", StringComparison.OrdinalIgnoreCase)) { Main("ExcavationSiteCancel", UpdateType.Script); return; }
     if (s.Equals("PathfinderMaxSpeedRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderMaxSpeedRequest", UpdateType.Script); return; }
     if (s.Equals("LiveDockDataRequest", StringComparison.OrdinalIgnoreCase)) { Main("LiveDockDataRequest", UpdateType.Script); return; }
-    if (s.Equals("ActiveAsteroidSnapshotRequest", StringComparison.OrdinalIgnoreCase)) { Main("ActiveAsteroidSnapshotRequest", UpdateType.Script); return; }
     if (s.Equals("PathfinderReturnRequest", StringComparison.OrdinalIgnoreCase)) { Main("PathfinderReturnRequest", UpdateType.Script); return; }
     if (s.Equals("AsteroidSetUpComplete", StringComparison.OrdinalIgnoreCase)) { Main("AsteroidSetUpComplete", UpdateType.Script); return; }
     if (s.Equals("Reset", StringComparison.OrdinalIgnoreCase)) { Main("Reset", UpdateType.Script); return; }
@@ -884,15 +884,19 @@ bool TryBuildReturnPathRoute(out string route)
 {
     route = "";
     MyIni ini; string section;
-    if (!GetSelectedAsteroidIni(out ini, out section)) { Echo("No selected asteroid."); return false; }
-    int n = Math.Max(1, currentSiteN - 1);
-    if (!ini.ContainsKey(section, $"ExcavationSite{n}") &&
-        !ini.ContainsKey(section, $"ExcavationSiteStagger{n}") &&
-        !ini.ContainsKey(section, $"ExcavationSitePath{n}_1"))
+    if (!GetCurrentAsteroidIni(out ini, out section)) { Echo("No asteroid setup."); return; }
+    const int MAX_SITE_SCAN = 50;
+    List<int> siteNumbers = new List<int>();
+    for (int n = 1; n <= MAX_SITE_SCAN; n++)
     {
-        Echo("No site data.");
-        return false;
+        bool hasData =
+            ini.ContainsKey(section, $"ExcavationSite{n}") ||
+            ini.ContainsKey(section, $"ExcavationSiteStagger{n}") ||
+            ini.ContainsKey(section, $"ExcavationSitePath{n}_1") ||
+            (n == 1 && ini.ContainsKey(section, "ExcavationSiteEntry1"));
+        if (hasData) siteNumbers.Add(n);
     }
+    if (siteNumbers.Count == 0) { Echo("No site data."); return; }
 
     // Read close distances from field DB Settings
     MyIni fieldIni = new MyIni();
@@ -901,18 +905,6 @@ bool TryBuildReturnPathRoute(out string route)
     double pathClose = fieldIni.Get("Settings", "PathCloseDistance").ToDouble(2.5);
     double staggerClose = fieldIni.Get("Settings", "StaggerCloseDistance").ToDouble(0.5);
     double siteClose = fieldIni.Get("Settings", "SiteCloseDistance").ToDouble(0.5);
-
-    // Gather: (optional first-site Entry), Stagger, Paths, Site (orientations included)
-    string entry = (n == 1 && ini.ContainsKey(section, "ExcavationSiteEntry1")) ? ini.Get(section, "ExcavationSiteEntry1").ToString() : "";
-    string stagger = ini.ContainsKey(section, $"ExcavationSiteStagger{n}") ? ini.Get(section, $"ExcavationSiteStagger{n}").ToString() : "";
-    string site = ini.ContainsKey(section, $"ExcavationSite{n}") ? ini.Get(section, $"ExcavationSite{n}").ToString() : "";
-    List<string> pathList = new List<string>();
-    int idx = 1;
-    while (ini.ContainsKey(section, $"ExcavationSitePath{n}_{idx}"))
-    {
-        pathList.Add(ini.Get(section, $"ExcavationSitePath{n}_{idx}").ToString());
-        idx++;
-    }
 
     // We'll store in flat parallel arrays
     List<string> gpsList = new List<string>();
@@ -930,16 +922,29 @@ bool TryBuildReturnPathRoute(out string route)
         }
     };
 
-    if (!string.IsNullOrWhiteSpace(stagger)) addPoint(stagger, staggerClose);
+    // Build full asteroid route: latest site -> oldest site.
+    for (int s = siteNumbers.Count - 1; s >= 0; s--)
+    {
+        int n = siteNumbers[s];
+        string stagger = ini.ContainsKey(section, $"ExcavationSiteStagger{n}") ? ini.Get(section, $"ExcavationSiteStagger{n}").ToString() : "";
+        string site = ini.ContainsKey(section, $"ExcavationSite{n}") ? ini.Get(section, $"ExcavationSite{n}").ToString() : "";
+        string entry = (n == 1 && ini.ContainsKey(section, "ExcavationSiteEntry1")) ? ini.Get(section, "ExcavationSiteEntry1").ToString() : "";
 
-    pathList.Reverse();
-    foreach (var p in pathList)
-        addPoint(p, pathClose);
+        if (!string.IsNullOrWhiteSpace(stagger)) addPoint(stagger, staggerClose);
 
-    if (!string.IsNullOrWhiteSpace(entry)) addPoint(entry, entryClose);
+        List<string> pathList = new List<string>();
+        int idx = 1;
+        while (ini.ContainsKey(section, $"ExcavationSitePath{n}_{idx}"))
+        {
+            pathList.Add(ini.Get(section, $"ExcavationSitePath{n}_{idx}").ToString());
+            idx++;
+        }
+        pathList.Reverse();
+        foreach (var p in pathList) addPoint(p, pathClose);
 
-    // Add final site as the end-point, if it exists
-    if (!string.IsNullOrWhiteSpace(site)) addPoint(site, siteClose);
+        if (!string.IsNullOrWhiteSpace(entry)) addPoint(entry, entryClose);
+        if (!string.IsNullOrWhiteSpace(site)) addPoint(site, siteClose);
+    }
 
     // Flatten to Path|<gps>|<orient>|<close>|...
     List<string> all = new List<string>();
@@ -950,8 +955,9 @@ bool TryBuildReturnPathRoute(out string route)
         all.Add(closeList[i]);
     }
 
-    route = string.Join("|", all);
-    return true;
+    string route = string.Join("|", all);
+    BroadcastPathfinder("Path|" + route);
+    Echo("Sent: Path|" + route);
 }
 
 // --- PATHFINDER MAX SPEED BROADCAST ---
@@ -981,6 +987,7 @@ void GetRotationAngles(Vector3D forward, Vector3D up, out double yaw, out double
 void BroadcastPathfinder(string message)
 {
     IGC.SendBroadcastMessage(PATHFINDER_CHANNEL, message);
+    IGC.SendBroadcastMessage(PATHFINDER_CHANNEL_LEGACY, message);
 }
 
 void SendLiveDockData()
