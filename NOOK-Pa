@@ -16,6 +16,13 @@ IMyTextPanel lcdPath; IMyTextPanel lcdConfirm; IMyLightingBlock indicatorLight; 
 IMySensorBlock sensor; // Added sensor reference
 IMyShipConnector connector;
 GyroControl gyroControl;
+List<IMyThrust> cachedThrusters = new List<IMyThrust>();
+List<IMyGyro> cachedGyros = new List<IMyGyro>();
+int blockRefreshTicker = 999;
+const int BLOCK_REFRESH_INTERVAL_TICKS = 60; // Update10 -> ~10s
+const double THRUST_GAIN_PER_KG = 1.5;
+const double THRUST_GAIN_MIN = 90000;
+const double THRUST_GAIN_MAX = 450000;
 
 bool blinkRequested = false; int blinkTicks = 0; Color blinkColor = new Color(0, 255, 0); 
 bool hasEntry1Target = false;
@@ -233,6 +240,7 @@ public void Main(string argument, UpdateType updateSource) {
             if (str != null) { 
                 if (str.StartsWith("Confirmed_Entry|")) HandleConfirmedEntry(str); 
                 else if (str.StartsWith("Path|")) HandlePathMessage(str); 
+                else if (str.StartsWith("ActiveAsteroidSnapshot|")) HandleAsteroidSnapshotMessage(str);
                 else if (str.StartsWith("PathfinderMaxSpeed|")) HandleMaxSpeed(str); 
                 else if (str.StartsWith("LiveDockData|")) HandleLiveDockData(str);
             } 
@@ -269,6 +277,7 @@ public void Main(string argument, UpdateType updateSource) {
         } 
     } 
     OutputPathStatus(); 
+    PrintDebugState();
 } 
 
 bool CmdIs(string cmd, string primary, string legacy) {
@@ -294,6 +303,69 @@ void ConfigureSensorVisuals(bool active) {
     }
 }
 
+void RefreshBlocks(bool force)
+{
+    if (!force) return;
+    blockRefreshTicker = 0;
+    lcdPath = GridTerminalSystem.GetBlockWithName(LCD_PATH_NAME) as IMyTextPanel;
+    lcdConfirm = GridTerminalSystem.GetBlockWithName(LCD_CONFIRM_NAME) as IMyTextPanel;
+    indicatorLight = GridTerminalSystem.GetBlockWithName(INDICATOR_NAME) as IMyLightingBlock;
+    remote = GridTerminalSystem.GetBlockWithName(REMOTE_TAG) as IMyRemoteControl;
+    sensor = GridTerminalSystem.GetBlockWithName(SENSOR_TAG) as IMySensorBlock;
+    soundBlock = GridTerminalSystem.GetBlockWithName(SOUND_BLOCK_NAME) as IMySoundBlock;
+    connector = GridTerminalSystem.GetBlockWithName(CONNECTOR_TAG) as IMyShipConnector;
+    cachedThrusters.Clear();
+    cachedGyros.Clear();
+    GridTerminalSystem.GetBlocksOfType(cachedThrusters);
+    GridTerminalSystem.GetBlocksOfType(cachedGyros);
+    gyroControl = remote != null ? new GyroControl(remote, cachedGyros) : null;
+}
+
+double GetThrustGain()
+{
+    if (remote == null) return THRUST_GAIN_MIN;
+    double mass = remote.CalculateShipMass().PhysicalMass;
+    return MathHelper.Clamp(mass * THRUST_GAIN_PER_KG, THRUST_GAIN_MIN, THRUST_GAIN_MAX);
+}
+
+void ApplyVelocityError(Vector3D velErr)
+{
+    double gain = GetThrustGain();
+    foreach (var t in cachedThrusters) {
+        Vector3D accelDir = -t.WorldMatrix.Forward;
+        double thrustDemand = Vector3D.Dot(velErr, accelDir);
+        t.ThrustOverride = thrustDemand > 0.05 ? (float)(thrustDemand * gain) : 0f;
+    }
+}
+
+void PrintDebugState()
+{
+    var states = new List<string>();
+    if (isSoftLocked) states.Add("SoftLock");
+    if (autoReturnToStaggerActive) states.Add("AutoReturnStagger");
+    if (undoReturnActive) states.Add("UndoReturn");
+    if (undockActive) states.Add("UndockStraight");
+    if (undockToEntryActive) states.Add("UndockToEntry");
+    if (dockStraightActive) states.Add("DockStage");
+    if (dockActive) states.Add("DockFinal");
+    if (automineActive) states.Add("AutoMine");
+    if (autominePendingPath) states.Add("AwaitingPath");
+    if (recordingActive) states.Add(recordingPaused ? "RecordingPaused" : "Recording");
+    if (states.Count == 0) states.Add("Idle");
+    string txt =
+        $"State: {string.Join(", ", states)}\n" +
+        $"SetupStep: {setupStep}\n" +
+        $"PathIdx: {autominePathIndex}/{pathGPS.Count}\n" +
+        $"Entry1: {(hasEntry1Target ? "Yes" : "No")}, Connector: {(hasLiveConnectorTarget ? "Yes" : "No")}\n" +
+        $"Thrusters: {cachedThrusters.Count}, Gyros: {cachedGyros.Count}\n" +
+        $"Runtime: {Runtime.LastRunTimeMs:0.000} ms";
+    Echo(txt);
+    var surface = Me.GetSurface(0);
+    surface.ContentType = ContentType.TEXT_AND_IMAGE;
+    surface.FontSize = 0.85f;
+    surface.WriteText(txt);
+}
+
 // ... [Remainder of your GyroControl, PID, and Helper classes/methods stay exactly the same] ...
 
 void ApplySoftLock(double dt) {
@@ -307,10 +379,10 @@ void ApplySoftLock(double dt) {
         double cVel = Vector3D.Dot(remote.GetShipVelocities().LinearVelocity, remote.WorldMatrix.Forward);
         double tVel = MathHelper.Clamp((fwdErr / 5.0) * 2.0, -3.0, 3.0);
         double vErr = tVel - cVel;
-        List<IMyThrust> thrusters = new List<IMyThrust>(); GridTerminalSystem.GetBlocksOfType(thrusters);
-        foreach (var t in thrusters) {
-            if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Backward) > 0.9) t.ThrustOverride = vErr > 0.05 ? (float)(vErr * 180000) : 0;
-            if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Forward) > 0.9) t.ThrustOverride = vErr < -0.05 ? (float)(Math.Abs(vErr) * 180000) : 0;
+        double gain = GetThrustGain();
+        foreach (var t in cachedThrusters) {
+            if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Backward) > 0.9) t.ThrustOverride = vErr > 0.05 ? (float)(vErr * gain) : 0;
+            if (Vector3D.Dot(t.WorldMatrix.Forward, remote.WorldMatrix.Forward) > 0.9) t.ThrustOverride = vErr < -0.05 ? (float)(Math.Abs(vErr) * gain) : 0;
         }
     } else StopThrusterOverrides();
 }
@@ -857,7 +929,7 @@ void HandleLiveDockData(string msg)
 }
 
 void StopOverrides() { StopThrusterOverrides(); gyroControl?.Reset(); }
-void StopThrusterOverrides() { List<IMyThrust> t = new List<IMyThrust>(); GridTerminalSystem.GetBlocksOfType(t); foreach (var x in t) x.ThrustOverride = 0; }
+void StopThrusterOverrides() { foreach (var x in cachedThrusters) x.ThrustOverride = 0; }
 
 bool TryParseGPS(string gps, out Vector3D pos) { 
     pos = Vector3D.Zero; var p = gps.Split(':'); if (p.Length < 5) return false; 
